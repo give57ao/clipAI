@@ -47,6 +47,8 @@ python scan_clip_folders.py --allow-overwrite
 | `setup_labeling_project.py` | 폴더 초기 세팅 |
 | `scan_clip_folders.py` | 클립 폴더 스캔 → `clips_index.csv` |
 | `slice_background.py` | background 풀영상 → 12초 청크 분할 |
+| `train_game_roi.py` | **0단계** 게임 화면 ROI 추론 모델 |
+| `game_roi.py` | ROI 추론/크롭 공통 모듈 |
 | `train_binary.py` | **1단계** 하이라이트 vs background |
 | `train_highlight_types.py` | **2단계** 4종 타입 분류 |
 | `infer_highlights.py` | 녹화본 슬라이딩 윈도우 추론 + 클립 추출 |
@@ -55,17 +57,18 @@ python scan_clip_folders.py --allow-overwrite
 | `extract_labeled_clips.py` | (선택) 구간 클립 추출 |
 | `labeling_constants.py` | 4종 라벨 정의 |
 
-## 학습 (2단계)
+## 학습 (3단계)
 
 ```powershell
 cd C:\clipAI\files
+python -u train_game_roi.py
 python -u train_binary.py
 python -u train_highlight_types.py
 ```
 
-결과 모델:
-- `E:\Highlights\ml_dataset\models\highlight_binary_best.pt`
-- `E:\Highlights\ml_dataset\models\highlight_types_best.pt`
+- **0단계**: 게임 화면 ROI (`game_roi_best.pt`) — 방송/전체화면 레이아웃 자동 크롭
+- **1단계**: 하이라이트 vs background (`highlight_binary_best.pt`)
+- **2단계**: 4종 타입 분류 (`highlight_types_best.pt`)
 
 ## 추론 (OBS 녹화본)
 

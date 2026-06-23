@@ -17,6 +17,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
 
+from game_roi import GameRoiBatchProcessor
 from labeling_constants import ALL_CLIP_LABELS, BACKGROUND_LABEL, HIGHLIGHT_LABELS
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm"}
@@ -73,12 +74,17 @@ class ClipFrameDataset(Dataset):
         train: bool,
         num_frames: int = 4,
         binary: bool = False,
+        dataset_root: Path | None = None,
+        use_game_roi: bool = True,
+        defer_roi_to_gpu: bool = True,
     ):
         self.rows = rows
         self.label_to_idx = label_to_idx
         self.num_frames = max(1, num_frames)
         self.binary = binary
         self.train = train
+        self.defer_roi_to_gpu = use_game_roi and defer_roi_to_gpu and dataset_root is not None
+        self.use_game_roi = use_game_roi
         aug = [transforms.RandomHorizontalFlip(p=0.5)] if train else []
         self.transform = transforms.Compose(
             [
@@ -92,6 +98,13 @@ class ClipFrameDataset(Dataset):
                 ),
             ]
         )
+        self.roi_predictor = None
+        if use_game_roi and dataset_root is not None and not self.defer_roi_to_gpu:
+            from game_roi import GameRoiPredictor
+            self.roi_predictor = GameRoiPredictor(
+                dataset_root / "models" / "game_roi_best.pt",
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -117,24 +130,50 @@ class ClipFrameDataset(Dataset):
             return None
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+    def _prepare_frame(self, frame: np.ndarray) -> np.ndarray:
+        if self.roi_predictor is not None:
+            return self.roi_predictor.crop_rgb(frame)
+        return frame
+
     def __getitem__(self, index: int):
         row = self.rows[index]
         label_idx = self._label_idx(row.label)
-        frames: list[torch.Tensor] = []
+        raw_frames: list[np.ndarray] = []
 
         for _ in range(self.num_frames):
-            tensor = None
+            frame = None
             for _try in range(4):
                 frame = self._read_random_frame(row.clip_path)
                 if frame is not None:
-                    tensor = self.transform(frame)
                     break
-            if tensor is None:
-                blank = np.zeros((224, 224, 3), dtype=np.uint8)
-                tensor = self.transform(blank)
-            frames.append(tensor)
+            if frame is None:
+                frame = np.zeros((224, 224, 3), dtype=np.uint8)
+            raw_frames.append(frame)
 
+        if self.defer_roi_to_gpu:
+            return raw_frames, label_idx
+
+        frames: list[torch.Tensor] = []
+        for frame in raw_frames:
+            prepared = self._prepare_frame(frame) if self.roi_predictor is not None else frame
+            frames.append(self.transform(prepared))
         return torch.stack(frames, dim=0), label_idx
+
+
+def collate_raw_frames(batch):
+    frames, labels = zip(*batch)
+    return list(frames), torch.tensor(labels, dtype=torch.long)
+
+
+def make_roi_processor(
+    dataset_root: Path,
+    device: torch.device,
+    train: bool,
+) -> GameRoiBatchProcessor | None:
+    roi_path = dataset_root / "models" / "game_roi_best.pt"
+    if not roi_path.exists():
+        return None
+    return GameRoiBatchProcessor(dataset_root, device, train=train)
 
 
 class FocalLoss(nn.Module):
@@ -165,6 +204,18 @@ def forward_multi_frame(model: nn.Module, images: torch.Tensor) -> torch.Tensor:
     return logits
 
 
+def _prepare_batch(batch, device: torch.device, roi_processor: GameRoiBatchProcessor | None):
+    if isinstance(batch[0], list):
+        if roi_processor is None:
+            raise RuntimeError("ROI processor가 필요합니다.")
+        frames_list, labels = batch
+        images = roi_processor(frames_list).to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        return images, labels
+    images, labels = batch
+    return images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -172,6 +223,7 @@ def evaluate(
     device,
     idx_to_label: dict[int, str],
     positive_labels: set[str] | None = None,
+    roi_processor: GameRoiBatchProcessor | None = None,
 ) -> tuple[float, dict[str, float], float]:
     model.eval()
     correct = 0
@@ -182,9 +234,8 @@ def evaluate(
     tp = fp = fn = 0
     use_binary_recall = positive_labels is not None
 
-    for images, labels in loader:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    for batch in loader:
+        images, labels = _prepare_batch(batch, device, roi_processor)
         logits = forward_multi_frame(model, images)
         preds = logits.argmax(dim=1)
 
@@ -217,13 +268,19 @@ def evaluate(
     return acc, per_label_recall, highlight_recall
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
+def train_one_epoch(
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    roi_processor: GameRoiBatchProcessor | None = None,
+) -> float:
     model.train()
     running_loss = 0.0
     total = 0
-    for images, labels in loader:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    for batch in loader:
+        images, labels = _prepare_batch(batch, device, roi_processor)
         optimizer.zero_grad(set_to_none=True)
         logits = forward_multi_frame(model, images)
         loss = criterion(logits, labels)

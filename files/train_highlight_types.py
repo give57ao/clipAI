@@ -18,8 +18,10 @@ from ml_train_common import (
     FocalLoss,
     build_model,
     build_train_rows_types,
+    collate_raw_frames,
     evaluate,
     load_clip_rows,
+    make_roi_processor,
     train_one_epoch,
 )
 
@@ -31,9 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="하이라이트 4종 타입 분류기")
     parser.add_argument("--dataset-root", default=r"E:\Highlights\ml_dataset")
     parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--num-frames", type=int, default=4)
     parser.add_argument("--highlight-repeat", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
@@ -72,6 +74,14 @@ def main() -> int:
     print(f"[types] highlights train={len(train_hi)} val={len(val_hi)} test={len(test_hi)}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[types] device={device}", flush=True)
+
+    roi_train = make_roi_processor(dataset_root, device, train=True)
+    roi_val = make_roi_processor(dataset_root, device, train=False)
+    collate_fn = collate_raw_frames if roi_train is not None else None
+    if roi_train is not None:
+        print("[types] game_roi=gpu-batch", flush=True)
+
     model = build_model(len(HIGHLIGHT_LABELS)).to(device)
 
     best_macro_recall = -1.0
@@ -81,18 +91,20 @@ def main() -> int:
     for epoch in range(1, args.epochs + 1):
         train_rows = build_train_rows_types(train_hi, args.highlight_repeat)
         train_ds = ClipFrameDataset(
-            train_rows, LABEL_TO_IDX, train=True, num_frames=args.num_frames, binary=False
+            train_rows, LABEL_TO_IDX, train=True, num_frames=args.num_frames,
+            binary=False, dataset_root=dataset_root,
         )
         val_ds = ClipFrameDataset(
-            val_hi, LABEL_TO_IDX, train=False, num_frames=args.num_frames, binary=False
+            val_hi, LABEL_TO_IDX, train=False, num_frames=args.num_frames,
+            binary=False, dataset_root=dataset_root,
         )
         train_loader = DataLoader(
             train_ds, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
         val_loader = DataLoader(
             val_ds, batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
 
         weights = compute_class_weights(train_rows, device)
@@ -100,8 +112,12 @@ def main() -> int:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_acc, val_per, _ = evaluate(model, val_loader, device, IDX_TO_LABEL)
+        train_loss = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, roi_processor=roi_train
+        )
+        val_acc, val_per, _ = evaluate(
+            model, val_loader, device, IDX_TO_LABEL, roi_processor=roi_val
+        )
         macro_recall = sum(val_per.values()) / max(1, len(val_per))
         elapsed = time.time() - t0
 
@@ -143,11 +159,12 @@ def main() -> int:
         model.load_state_dict(ckpt["model_state"])
         test_loader = DataLoader(
             ClipFrameDataset(test_hi, LABEL_TO_IDX, train=False,
-                             num_frames=args.num_frames, binary=False),
+                             num_frames=args.num_frames, binary=False,
+                             dataset_root=dataset_root),
             batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
-        test_acc, test_per, _ = evaluate(model, test_loader, device, IDX_TO_LABEL)
+        test_acc, test_per, _ = evaluate(model, test_loader, device, IDX_TO_LABEL, roi_processor=roi_val)
         print(f"[types] test_acc={test_acc*100:.1f}%", flush=True)
         for label in HIGHLIGHT_LABELS:
             if label in test_per:

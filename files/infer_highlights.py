@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 from torchvision import transforms
 
+from game_roi import GameRoiPredictor
 from labeling_constants import HIGHLIGHT_LABELS
 from ml_train_common import forward_multi_frame, build_model
 from video_utils import probe_duration_sec
@@ -42,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--type-threshold", type=float, default=0.35)
     parser.add_argument("--num-frames", type=int, default=4)
     parser.add_argument("--merge-gap-sec", type=float, default=3.0)
+    parser.add_argument("--no-game-roi", action="store_true", help="게임 ROI 크롭 비활성화")
+    parser.add_argument("--binary-only", action="store_true", help="1단계만 사용 (타입 분류 생략)")
     parser.add_argument("--dry-run", action="store_true", help="클립 추출 없이 구간만 출력")
     return parser.parse_args()
 
@@ -68,7 +72,11 @@ def build_transform() -> transforms.Compose:
     )
 
 
-def read_frame_at_sec(video_path: Path, time_sec: float) -> torch.Tensor | None:
+def read_frame_at_sec(
+    video_path: Path,
+    time_sec: float,
+    roi_predictor: GameRoiPredictor | None = None,
+) -> np.ndarray | None:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return None
@@ -80,6 +88,8 @@ def read_frame_at_sec(video_path: Path, time_sec: float) -> torch.Tensor | None:
     if not ok or frame is None:
         return None
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    if roi_predictor is not None:
+        return roi_predictor.crop_rgb(rgb)
     return rgb
 
 
@@ -89,6 +99,7 @@ def sample_window_tensors(
     window_sec: float,
     num_frames: int,
     transform: transforms.Compose,
+    roi_predictor: GameRoiPredictor | None = None,
 ) -> torch.Tensor | None:
     if num_frames <= 1:
         offsets = [window_sec * 0.5]
@@ -98,7 +109,7 @@ def sample_window_tensors(
 
     frames: list[torch.Tensor] = []
     for offset in offsets:
-        rgb = read_frame_at_sec(video_path, start_sec + offset)
+        rgb = read_frame_at_sec(video_path, start_sec + offset, roi_predictor)
         if rgb is None:
             return None
         frames.append(transform(rgb))
@@ -140,13 +151,14 @@ def scan_video(
     device: torch.device,
     args: argparse.Namespace,
     transform: transforms.Compose,
+    roi_predictor: GameRoiPredictor | None = None,
 ) -> list[HighlightSegment]:
     segments: list[HighlightSegment] = []
     start = 0.0
     while start + args.window_sec <= duration_sec + 0.01:
         end = min(start + args.window_sec, duration_sec)
         window_tensor = sample_window_tensors(
-            video_path, start, args.window_sec, args.num_frames, transform
+            video_path, start, args.window_sec, args.num_frames, transform, roi_predictor
         )
         if window_tensor is None:
             start += args.stride_sec
@@ -154,17 +166,28 @@ def scan_video(
 
         hi_score, hi_pred = predict_binary(binary_model, window_tensor, device)
         if hi_pred == 1 and hi_score >= args.binary_threshold:
-            hi_type, type_score = predict_type(type_model, window_tensor, device)
-            if type_score >= args.type_threshold:
+            if args.binary_only:
                 segments.append(
                     HighlightSegment(
                         start_sec=start,
                         end_sec=end,
                         highlight_score=hi_score,
-                        highlight_type=hi_type,
-                        type_score=type_score,
+                        highlight_type="highlight",
+                        type_score=1.0,
                     )
                 )
+            else:
+                hi_type, type_score = predict_type(type_model, window_tensor, device)
+                if type_score >= args.type_threshold:
+                    segments.append(
+                        HighlightSegment(
+                            start_sec=start,
+                            end_sec=end,
+                            highlight_score=hi_score,
+                            highlight_type=hi_type,
+                            type_score=type_score,
+                        )
+                    )
         start += args.stride_sec
     return segments
 
@@ -233,31 +256,50 @@ def main() -> int:
     models_dir = dataset_root / "models"
     binary_path = models_dir / "highlight_binary_best.pt"
     types_path = models_dir / "highlight_types_best.pt"
-    if not binary_path.exists() or not types_path.exists():
-        print("[infer] 모델 없음. train_binary.py / train_highlight_types.py 먼저 실행.")
+    if not binary_path.exists():
+        print("[infer] binary 모델 없음. train_binary.py 먼저 실행.")
+        return 1
+    if not args.binary_only and not types_path.exists():
+        print("[infer] types 모델 없음. train_highlight_types.py 또는 --binary-only 사용.")
         return 1
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     binary_model, _ = load_checkpoint(binary_path, device)
-    type_model, ckpt_frames = load_checkpoint(types_path, device)
+    type_model = None
+    ckpt_frames = 4
+    if args.binary_only:
+        print("[infer] mode=binary-only (1단계만)", flush=True)
+    else:
+        type_model, ckpt_frames = load_checkpoint(types_path, device)
     if args.num_frames != ckpt_frames:
         args.num_frames = ckpt_frames
 
     transform = build_transform()
+    roi_predictor = None
+    if not args.no_game_roi:
+        roi_predictor = GameRoiPredictor.from_dataset_root(dataset_root, device=device)
+        mode = "neural" if roi_predictor.uses_neural else "teacher-fallback"
+        print(f"[infer] game_roi={mode}", flush=True)
+
     print(f"[infer] video={video_path.name} duration={duration_sec:.1f}s device={device}")
 
     raw_segments = scan_video(
-        video_path, duration_sec, binary_model, type_model, device, args, transform
+        video_path, duration_sec, binary_model, type_model, device, args, transform, roi_predictor
     )
     segments = merge_segments(raw_segments, args.merge_gap_sec)
     print(f"[infer] windows_hit={len(raw_segments)} merged={len(segments)}")
 
     output_dir = Path(args.output_dir) if args.output_dir else dataset_root / "inferred" / video_path.stem
+    name_prefix = f"{video_path.stem}_하이라이트"
     rows: list[dict] = []
 
     for i, seg in enumerate(segments, start=1):
-        clip_name = f"{seg.highlight_type}_{i:03d}_{int(seg.start_sec)}s.mp4"
-        out_path = output_dir / seg.highlight_type / clip_name
+        if args.binary_only:
+            clip_name = f"{name_prefix}_{i:03d}.mp4"
+            out_path = output_dir / clip_name
+        else:
+            clip_name = f"{seg.highlight_type}_{i:03d}_{int(seg.start_sec)}s.mp4"
+            out_path = output_dir / seg.highlight_type / clip_name
         row = {
             "video_path": str(video_path),
             "start_sec": f"{seg.start_sec:.2f}",

@@ -18,8 +18,10 @@ from ml_train_common import (
     FocalLoss,
     build_model,
     build_train_rows_binary,
+    collate_raw_frames,
     evaluate,
     load_clip_rows,
+    make_roi_processor,
     train_one_epoch,
 )
 
@@ -31,9 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="하이라이트 이진 탐지기 학습")
     parser.add_argument("--dataset-root", default=r"E:\Highlights\ml_dataset")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--num-frames", type=int, default=4)
     parser.add_argument("--max-background-train", type=int, default=150)
     parser.add_argument("--highlight-repeat", type=int, default=15)
@@ -70,6 +72,12 @@ def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[binary] device={device}", flush=True)
 
+    roi_train = make_roi_processor(dataset_root, device, train=True)
+    roi_val = make_roi_processor(dataset_root, device, train=False)
+    collate_fn = collate_raw_frames if roi_train is not None else None
+    if roi_train is not None:
+        print("[binary] game_roi=gpu-batch", flush=True)
+
     model = build_model(2).to(device)
     best_highlight_recall = -1.0
     best_path = models_dir / "highlight_binary_best.pt"
@@ -87,20 +95,20 @@ def main() -> int:
 
         train_ds = ClipFrameDataset(
             train_rows, BINARY_LABEL_TO_IDX, train=True,
-            num_frames=args.num_frames, binary=True,
+            num_frames=args.num_frames, binary=True, dataset_root=dataset_root,
         )
         val_ds = ClipFrameDataset(
             val_rows, BINARY_LABEL_TO_IDX, train=False,
-            num_frames=args.num_frames, binary=True,
+            num_frames=args.num_frames, binary=True, dataset_root=dataset_root,
         )
 
         train_loader = DataLoader(
             train_ds, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
         val_loader = DataLoader(
             val_ds, batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
 
         weights = torch.tensor([1.0, 3.0], device=device)
@@ -108,9 +116,12 @@ def main() -> int:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_one_epoch(
+            model, train_loader, criterion, optimizer, device, roi_processor=roi_train
+        )
         val_acc, val_per, highlight_recall = evaluate(
-            model, val_loader, device, BINARY_IDX_TO_LABEL, positive_labels={"highlight"}
+            model, val_loader, device, BINARY_IDX_TO_LABEL,
+            positive_labels={"highlight"}, roi_processor=roi_val,
         )
         elapsed = time.time() - t0
 
@@ -149,12 +160,14 @@ def main() -> int:
         model.load_state_dict(ckpt["model_state"])
         test_loader = DataLoader(
             ClipFrameDataset(test_rows, BINARY_LABEL_TO_IDX, train=False,
-                             num_frames=args.num_frames, binary=True),
+                             num_frames=args.num_frames, binary=True,
+                             dataset_root=dataset_root),
             batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True,
+            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn,
         )
         test_acc, _, test_recall = evaluate(
-            model, test_loader, device, BINARY_IDX_TO_LABEL, positive_labels={"highlight"}
+            model, test_loader, device, BINARY_IDX_TO_LABEL,
+            positive_labels={"highlight"}, roi_processor=roi_val,
         )
         print(f"[binary] test_acc={test_acc*100:.1f}% highlight_recall={test_recall*100:.1f}%", flush=True)
     else:

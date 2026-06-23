@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# IDE / local tools
+.claude/
+.vscode/
+.idea/
+*.swp
+
+# ML artifacts (dataset is external; do not commit)
+*.pt
+*.pth
+*.onnx
+*.log
+ml_dataset/
+clips/
+manifests/
+inferred/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

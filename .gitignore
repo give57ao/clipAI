@@ -27,3 +27,11 @@ inferred/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local debug / OCR legacy artifacts
+_*/
+_*.png
+_*.txt
+*.png
+candidate_*.mp4
+ffdump/

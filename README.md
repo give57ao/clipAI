@@ -5,7 +5,7 @@ OBS 녹화에서 **더블킬·멀티킬·세이브·올킬** 하이라이트를 
 ## 설치
 
 ```powershell
-git clone https://github.com/YOUR_USER/clipAI.git
+git clone https://github.com/give57ao/clipAI.git
 cd clipAI
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

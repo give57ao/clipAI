@@ -30,6 +30,105 @@ class ClipRow:
     split: str
 
 
+@dataclass
+class SegmentRow:
+    video_path: str
+    start_sec: float
+    end_sec: float
+    label: str
+    split: str
+    clip_path: str | None = None
+
+
+def load_segment_rows(manifest_path: Path, dataset_root: Path | None = None) -> list[SegmentRow]:
+    rows: list[SegmentRow] = []
+    if not manifest_path.exists():
+        return rows
+    clips_root = dataset_root / "clips" if dataset_root else None
+    with manifest_path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            label = (row.get("label") or "").strip()
+            split = (row.get("split") or "train").strip()
+            video_path = (row.get("video_path") or "").strip()
+            segment_id = (row.get("segment_id") or "").strip()
+            if label not in ALL_CLIP_LABELS or not video_path:
+                continue
+            if not Path(video_path).exists():
+                continue
+            try:
+                start_sec = float(row.get("start_sec", ""))
+                end_sec = float(row.get("end_sec", ""))
+            except (TypeError, ValueError):
+                continue
+            if end_sec <= start_sec:
+                continue
+            clip_path: str | None = None
+            if clips_root and segment_id:
+                candidate = clips_root / label / f"{segment_id}.mp4"
+                if candidate.exists():
+                    clip_path = str(candidate)
+            rows.append(
+                SegmentRow(
+                    video_path=video_path,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    label=label,
+                    split=split,
+                    clip_path=clip_path,
+                )
+            )
+    return rows
+
+
+def build_train_rows_segments_binary(
+    highlights: list[SegmentRow],
+    backgrounds: list[SegmentRow],
+    bg_max: int,
+    highlight_repeat: int,
+    rng: random.Random,
+) -> list[SegmentRow]:
+    hi = highlights * max(1, highlight_repeat)
+    bg_pool = backgrounds
+    if bg_max > 0 and len(bg_pool) > bg_max:
+        bg_pool = rng.sample(bg_pool, bg_max)
+    return hi + bg_pool
+
+
+def read_frame_at_sec_raw(video_path: Path, time_sec: float) -> np.ndarray | None:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_idx = max(0, int(time_sec * fps))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        return None
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+def sample_window_raw_frames(
+    video_path: Path,
+    start_sec: float,
+    window_sec: float,
+    num_frames: int,
+) -> list[np.ndarray] | None:
+    if num_frames <= 1:
+        offsets = [window_sec * 0.5]
+    else:
+        step = window_sec / num_frames
+        offsets = [step * (i + 0.5) for i in range(num_frames)]
+
+    frames: list[np.ndarray] = []
+    for offset in offsets:
+        rgb = read_frame_at_sec_raw(video_path, start_sec + offset)
+        if rgb is None:
+            return None
+        frames.append(rgb)
+    return frames
+
+
 def load_clip_rows(index_path: Path) -> list[ClipRow]:
     rows: list[ClipRow] = []
     with index_path.open("r", encoding="utf-8", newline="") as f:
@@ -149,6 +248,94 @@ class ClipFrameDataset(Dataset):
             if frame is None:
                 frame = np.zeros((224, 224, 3), dtype=np.uint8)
             raw_frames.append(frame)
+
+        if self.defer_roi_to_gpu:
+            return raw_frames, label_idx
+
+        frames: list[torch.Tensor] = []
+        for frame in raw_frames:
+            prepared = self._prepare_frame(frame) if self.roi_predictor is not None else frame
+            frames.append(self.transform(prepared))
+        return torch.stack(frames, dim=0), label_idx
+
+
+class WindowFrameDataset(Dataset):
+    """OBS 풀녹화 구간 — infer_highlights와 동일한 윈도우/프레임 샘플링."""
+
+    def __init__(
+        self,
+        rows: list[SegmentRow],
+        label_to_idx: dict[str, int],
+        train: bool,
+        num_frames: int = 4,
+        binary: bool = False,
+        dataset_root: Path | None = None,
+        use_game_roi: bool = True,
+        defer_roi_to_gpu: bool = True,
+    ):
+        self.rows = rows
+        self.label_to_idx = label_to_idx
+        self.num_frames = max(1, num_frames)
+        self.binary = binary
+        self.train = train
+        self.defer_roi_to_gpu = use_game_roi and defer_roi_to_gpu and dataset_root is not None
+        self.use_game_roi = use_game_roi
+        aug = [transforms.RandomHorizontalFlip(p=0.5)] if train else []
+        self.transform = transforms.Compose(
+            [
+                transforms.ToPILImage(),
+                *aug,
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+        self.roi_predictor = None
+        if use_game_roi and dataset_root is not None and not self.defer_roi_to_gpu:
+            from game_roi import GameRoiPredictor
+            self.roi_predictor = GameRoiPredictor(
+                dataset_root / "models" / "game_roi_best.pt",
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            )
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def _label_idx(self, label: str) -> int:
+        if self.binary:
+            return 0 if label == BACKGROUND_LABEL else 1
+        return self.label_to_idx[label]
+
+    def _prepare_frame(self, frame: np.ndarray) -> np.ndarray:
+        if self.roi_predictor is not None:
+            return self.roi_predictor.crop_rgb(frame)
+        return frame
+
+    def __getitem__(self, index: int):
+        row = self.rows[index]
+        label_idx = self._label_idx(row.label)
+
+        if row.clip_path and Path(row.clip_path).exists():
+            source = Path(row.clip_path)
+            start_sec = 0.0
+            window_sec = max(0.1, row.end_sec - row.start_sec)
+        else:
+            source = Path(row.video_path)
+            start_sec = row.start_sec
+            window_sec = max(0.1, row.end_sec - row.start_sec)
+
+        raw_frames: list[np.ndarray] | None = None
+        for _try in range(4):
+            raw_frames = sample_window_raw_frames(
+                source, start_sec, window_sec, self.num_frames
+            )
+            if raw_frames is not None:
+                break
+        if raw_frames is None:
+            raw_frames = [np.zeros((224, 224, 3), dtype=np.uint8)] * self.num_frames
 
         if self.defer_roi_to_gpu:
             return raw_frames, label_idx

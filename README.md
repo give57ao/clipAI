@@ -23,7 +23,16 @@ ffmpeg, ffprobe가 PATH에 있어야 합니다.
 | `save` | 세이브 |
 | `allkill` | 올킬 |
 
-## 가장 쉬운 방법 (권장)
+## 라운드 기반 파이프라인 (권장, 2026-06-26~)
+
+```powershell
+python -u detect_rounds.py "E:\OBS\<영상>.mp4"
+python -u scoreboard_k_reader.py "E:\OBS\<영상>.mp4" --rounds-dir "E:\Highlights\ml_dataset\rounds\<stem>" --json-out "E:\clipai_result\kill_timeline\<stem>.json"
+```
+
+상세: [HANDOFF.md](HANDOFF.md), [PLAYER_IDENTITY_AND_K_READER.md](PLAYER_IDENTITY_AND_K_READER.md)
+
+## 가장 쉬운 방법 (클립 라벨링)
 
 이미 잘라둔 mp4를 폴더에 넣기만 하면 됩니다.
 
@@ -52,7 +61,7 @@ python scan_clip_folders.py --allow-overwrite
 | `train_binary.py` | **1단계** 하이라이트 vs background |
 | `train_highlight_types.py` | **2단계** 4종 타입 분류 |
 | `infer_highlights.py` | 녹화본 슬라이딩 윈도우 추론 + 클립 추출 |
-| `train_classifier.py` | (구버전 5-class, 사용 비권장) |
+| `batch_infer_obs.py` | OBS 폴더 배치 추론 (`MAX_VIDEOS`로 파일럿 제한 가능) |
 | `build_label_manifest.py` | (선택) 원본 영상+시각 → 구간 생성 |
 | `extract_labeled_clips.py` | (선택) 구간 클립 추출 |
 | `labeling_constants.py` | 4종 라벨 정의 |

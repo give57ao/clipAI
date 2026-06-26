@@ -92,4 +92,4 @@ python train_highlight_types.py
 - **1단계**: 하이라이트 vs background → `models/highlight_binary_best.pt`
 - **2단계**: 4종 타입 분류 → `models/highlight_types_best.pt`
 
-하이라이트 클립 정리: [HIGHLIGHT_REVIEW.md](../HIGHLIGHT_REVIEW.md)
+**클립 정리 팁**: 킬 배너·연속킬 UI가 보이는 구간만 각 폴더에 둡니다. 애매한 클립은 `clips/review/`로 옮기면 학습에서 자동 제외됩니다.

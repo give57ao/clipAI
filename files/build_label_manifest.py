@@ -41,6 +41,18 @@ def parse_args() -> argparse.Namespace:
         help="background_videos.txt 영상당 음성 샘플 수",
     )
     parser.add_argument("--background-clip-sec", type=float, default=12.0)
+    parser.add_argument(
+        "--obs-negative-per-video",
+        type=int,
+        default=30,
+        help="known_highlights 영상당 hard negative 윈도우 수",
+    )
+    parser.add_argument(
+        "--obs-negative-margin-sec",
+        type=float,
+        default=6.0,
+        help="하이라이트 구간 주변 제외 마진(초)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--allow-overwrite",
@@ -177,6 +189,73 @@ def build_highlight_segments(
     return segments, skipped
 
 
+def _intervals_overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
+    return a_start < b_end and b_start < a_end
+
+
+def build_obs_hard_negative_segments(
+    highlight_segments: list[Segment],
+    per_video: int,
+    clip_sec: float,
+    margin_sec: float,
+    rng: random.Random,
+) -> list[Segment]:
+    """known_highlights와 같은 OBS 영상에서 하이라이트 구간을 피한 negative."""
+    by_video: dict[str, list[Segment]] = {}
+    for seg in highlight_segments:
+        by_video.setdefault(seg.video_path, []).append(seg)
+
+    segments: list[Segment] = []
+    max_attempts = max(50, per_video * 20)
+
+    for video_str, hi_segs in by_video.items():
+        video_path = Path(video_str)
+        dur = probe_duration_sec(video_path)
+        if dur is None or dur < clip_sec + 4:
+            continue
+
+        forbidden: list[tuple[float, float]] = []
+        for hi in hi_segs:
+            forbidden.append(
+                (
+                    max(0.0, hi.start_sec - margin_sec),
+                    min(dur, hi.end_sec + margin_sec),
+                )
+            )
+
+        added = 0
+        attempts = 0
+        while added < per_video and attempts < max_attempts:
+            attempts += 1
+            start_sec = rng.uniform(2.0, max(2.0, dur - clip_sec - 2.0))
+            end_sec = start_sec + clip_sec
+            blocked = any(
+                _intervals_overlap(start_sec, end_sec, fb_start, fb_end)
+                for fb_start, fb_end in forbidden
+            )
+            if blocked:
+                continue
+
+            segments.append(
+                Segment(
+                    segment_id=stable_segment_id(
+                        video_str, start_sec, end_sec, BACKGROUND_LABEL
+                    ),
+                    video_path=video_str,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    label=BACKGROUND_LABEL,
+                    split=pick_split(rng),
+                    source="obs_hard_negative",
+                    review_status="pending",
+                    notes="hard negative from pilot OBS",
+                )
+            )
+            added += 1
+
+    return segments
+
+
 def build_background_segments(
     videos: list[Path], per_video: int, clip_sec: float, rng: random.Random
 ) -> list[Segment]:
@@ -271,13 +350,20 @@ def main() -> int:
         background_videos = read_background_videos(legacy_normal)
 
     highlights, skipped_rows = build_highlight_segments(known_rows, rng)
+    hard_negatives = build_obs_hard_negative_segments(
+        highlights,
+        args.obs_negative_per_video,
+        args.background_clip_sec,
+        args.obs_negative_margin_sec,
+        rng,
+    )
     backgrounds = build_background_segments(
         background_videos,
         args.background_per_video,
         args.background_clip_sec,
         rng,
     )
-    all_segments = highlights + backgrounds
+    all_segments = highlights + hard_negatives + backgrounds
     all_segments.sort(key=lambda s: (s.label, s.video_path, s.start_sec))
 
     if not all_segments:

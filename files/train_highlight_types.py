@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import time
 from pathlib import Path
 
@@ -27,6 +28,15 @@ from ml_train_common import (
 
 LABEL_TO_IDX = {label: idx for idx, label in enumerate(HIGHLIGHT_LABELS)}
 IDX_TO_LABEL = {idx: label for label, idx in LABEL_TO_IDX.items()}
+WINDOW_EXTRACT_CLIP_RE = re.compile(
+    r"^(doublekill|multikill|save|allkill|background)_[a-f0-9]{12}\.mp4$",
+    re.IGNORECASE,
+)
+
+
+def is_window_extract_clip(clip_path: str) -> bool:
+    """extract_labeled_clips.py가 만든 12초 윈도우 클립 (타입 학습 제외)."""
+    return bool(WINDOW_EXTRACT_CLIP_RE.match(Path(clip_path).name))
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,7 +72,16 @@ def main() -> int:
     models_dir.mkdir(parents=True, exist_ok=True)
 
     all_rows = load_clip_rows(index_path)
-    highlight_rows = [r for r in all_rows if r.label in HIGHLIGHT_LABELS]
+    highlight_rows = [
+        r for r in all_rows
+        if r.label in HIGHLIGHT_LABELS and not is_window_extract_clip(r.clip_path)
+    ]
+    skipped_window = sum(
+        1 for r in all_rows
+        if r.label in HIGHLIGHT_LABELS and is_window_extract_clip(r.clip_path)
+    )
+    if skipped_window:
+        print(f"[types] skip window-extract clips={skipped_window}", flush=True)
     if len(highlight_rows) < 10:
         print("[types] 하이라이트 클립이 너무 적습니다.", flush=True)
         return 1

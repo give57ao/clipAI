@@ -1,8 +1,51 @@
 # HUD 올킬 파이프라인 핸드오프
 
-> 마지막 업데이트: 2026-07-06 (KST)  
-> **배치 36/113 완료 후 중단** (37번 `2026-04-14 00-32-52` 진행 중 kill)  
+> 마지막 업데이트: 2026-07-06 (KST) — **★ recall 0% 원인 확정 + 파이프라인 개편 (아래 §0)**  
 > 다음 채팅(클로드)에서 이 파일 + `files/detect_ace_hud.py` 먼저 읽고 이어서 작업.
+
+---
+
+## 0. ★ 2026-07-06 개편 — recall 0% 원인과 새 구조 (Fable 진단·설계)
+
+### 원인 (확정, 육안 검증 완료)
+
+1. **고정 KDA ROI가 숫자를 안 읽고 있었음** — `_KDA_LINE_X=(0.055,0.220)` + 라벨스킵 30%
+   → 실제 판독 시작점 gx≈0.105인데, **숫자는 gx 0.038~0.100에 있음**.
+   OBS 영상은 **4:3 게임화면**(game crop ≈1360×1035)이라 완전히 빗나감 → 판독률 0.6% (19/2993, 영상1).
+   16:9 캘리브 영상(1893px)에서만 우연히 가장자리에 걸려 "작동하는 듯" 보였음.
+2. **기존 템플릿(k_0,1,3,6)은 불량품** — 깨진 ROI 가장자리 **조각 글리프**로 수확된 것.
+   깨끗한 전체 글리프와는 매칭 안 됨 (score 0.1~0.3). 전량 재수확 필요.
+3. 판독이 0이니 ace 게이트(`k_samples>=6` + 연속 ΔK=3)는 통과 자체가 불가능했음.
+   기존 탐지 4건(R95 등)은 오독 잔재 = 전부 오탐.
+
+### 새 구조 (구현 완료)
+
+| 모듈 | 변경 |
+|------|------|
+| `hud_kda.py` | **`locate_kda_glyphs()`**: 좌측 밴드(gy 0.20-0.34, gx 0-0.22)에서 빨간 blob 행 자동 탐지 → 슬래시(`/`) 2개(행별 x-centroid 기울기 ≈-0.45로 판별)로 K/D/A 3그룹 분리. 레이아웃(4:3/16:9) 불문, **다자리 K(누적 10+) 지원**. 검증: 라벨영상 3개+캘리브 전 프레임 성공 |
+| `detect_ace_hud.py` | **`_KTracker` 상태머신**: 연속 2회 동일 판독으로만 K 전이 확정 → **킬 이벤트(시각+증가량)** 생성. 하향/+4↑ 점프는 연속 5회 → 리셋(하프타임·리조인) 처리. **트리플 가드**: K/D/A 셋 다 파싱된 프레임만 채택. ace = 라운드 내 킬 합계 **정확히 3** + **3번째 킬 이전 리셋 없음** + 20s↑ + 판독 4회↑. 경계 오차는 `_KILL_GRACE_SEC=2.5` 로 직전 라운드 귀속 |
+| `harvest_hud_digits.py` | **신규**: 글리프 수확 → IoU 클러스터링 → 몽타주 육안 라벨 → 숫자당 상위 3클러스터 medoid 설치 (OCR 부트스트랩은 단일 글리프에서 신뢰 불가로 폐기) |
+| `_compare_hud_gt.py` | **신규**: §3 정답 27건 vs `hud_timeline` JSON 자동 recall/precision |
+| `hud_digit_match.py` | `normalize_glyph` **letterbox**(비율 보존) + **`match_glyph_iou`**: IoU+마진 규칙(1등-2등 차 0.06↑일 때만 채택, 모호=None). TM_CCOEFF는 박스형 폰트(0/5/6 혼동)에서 변별력 부족 실측. **숫자당 다중 템플릿**(`k_3.png, k_3_b.png…`) 지원. 자동 캘리브 폴백 무력화 |
+
+**검증 (영상 1, 23-00-50)**: GT 올킬 1건(11:47-12:16) → **R20 ACE ✓** (킬 11:52/12:10/12:14, 오탐 0, resets 83→4).
+단 템플릿은 아직 2영상(1·10번) 수확분 — 전 영상 수확으로 순도 개선 필요 (7은 표본 3개, 9는 2개뿐).
+
+**튜닝 이력 (재발 방지)**:
+- `_REQ_CONFIRM=3`은 라운드 막판 킬 유실(킬 순간 글리프 페이드 애니메이션) → **2 고정**
+- 오독 방어는 확인 횟수 강화가 아니라 **트리플 가드 + IoU 마진 + 다중 템플릿**이 정답
+- 리셋 게이트는 라운드 전체가 아닌 **ace_sec 이전**만 검사 (올킬 직후 전환부 리베이스 노이즈)
+- 판독률 지표: hit ≈ row 발견 프레임의 60%↑ 정상, 그 미만이면 템플릿 순도부터 의심
+
+산출 JSON 스키마 변경: 라운드가 `kills / kill_times / resets` 를 갖고
+`k_base/max_delta_k/saw_k3_delta`는 제거됨. 구 JSON은 배치가 자동 재스캔.
+
+### ▶ 다음 작업 순서 (Opus/Sonnet 수행용 — §7 상세 가이드)
+
+1. 템플릿 수확·설치 (몽타주 라벨링 포함)
+2. 라벨 10영상 `--redo` 재스캔 → `_compare_hud_gt.py` 로 recall/precision 확인
+3. 미탐/오탐 개별 진단 → 임계값 튜닝 반복
+4. recall 확보 후 배치 37~113 재개
 
 ---
 
@@ -157,14 +200,80 @@ python -u batch_hud_ace_pipeline.py --only "2026-04-14 00-32-52"  # 37번부터
 
 ---
 
-## 7. 다음 TODO (클로드용)
+## 7. ▶ 수행 가이드 (Opus/Sonnet용 — 순서대로, 단계별 완료 확인 후 진행)
 
-1. **`_compare_hud_gt.py`** — 위 §3 정답 JSON + `hud_timeline` 자동 recall/precision
-2. **K 템플릿 확장** — 2,4,5,7,8,9 글리프; 캘리브 영상·GT 구간에서 harvest
-3. **라운드 경계** — 병합 완화, 전멸 아이콘 연속 프레임 임계값 튜닝
-4. **ΔK 판정** — `saw_k3_delta` + `max_delta_k==3` + 라운드 내 K monotonic 검증
-5. **하이브리드** — HUD 1차 후보 + 스코어보드 1b 2차 확인 (기존 `scoreboard_k_reader.py`)
-6. **배치 재개** — 37번부터; 라벨 영상은 수정 후 `--only` 재실행
+> 설계·핵심 코드는 완료 상태(§0). 아래는 **실행·검증·튜닝 반복** 작업.
+> 모든 명령은 `cd C:\clipAI\files` 후 실행. 시각 보고는 반드시 M:SS.
+
+### 단계 1 — 템플릿 보강 수확 (현재: 영상 1·10 수확분으로 1차 설치 완료)
+
+현 템플릿으로 영상 1 ACE 탐지 성공했으나 **7(표본3)·9(표본2)·4·8이 빈약**.
+전 영상 수확으로 순도·커버리지 개선:
+
+```powershell
+# 1-1. 라벨 10영상+캘리브 전체 수확 (긴 영상 포함 — 수십 분, 백그라운드 권장)
+#      ⚠ 기존 raw 유지한 채 이어 수확해도 됨 (파일명에 영상 stem 포함)
+python -u harvest_hud_digits.py --harvest --cluster --fps 0.3
+
+# 1-2. E:\clipai_result\hud_templates_harvest\clusters\ 의 cNN_montage_nXX.png 열어보고
+#      각 클러스터가 어떤 숫자인지 판단 (Read 툴로 이미지 직접 보기)
+#      → E:\clipai_result\hud_templates_harvest\cluster_labels.json 작성:
+#      {"c00": 0, "c01": 1, "c02": 3, "c03": "noise", ...}
+#      ⚠ 두 숫자가 섞인 클러스터는 라벨하지 말고 "mixed"로 버리기
+#      ⚠ 재클러스터 시 cID가 전부 바뀜 — labels.json 반드시 새로 작성
+
+# 1-3. 설치 (숫자당 상위 3클러스터가 k_d.png/k_d_b.png/k_d_c.png로 들어감, 자동 백업)
+python -u harvest_hud_digits.py --install
+```
+
+**완료 기준**: 0~9 전 숫자가 표본 10개 이상 클러스터에서 나올 것.
+빠진 숫자는 배치 12~36 영상 추가 수확(`--videos`)으로 보충.
+
+### 단계 2 — 판독률 스팟 체크 (재스캔 전 필수)
+
+임의 라벨 영상 1개에서 GT 구간 포함 3~5개 시각 프레임으로:
+`hud_kda.read_kda_triple_from_game()` 이 K/D/A를 정확히 읽는지 확인.
+K가 None이 계속 나오면 몽타주 라벨 오류부터 의심 (템플릿 교차 오염).
+
+### 단계 3 — 라벨 10영상 재스캔 + GT 대조
+
+```powershell
+# 라벨 10영상만 재스캔 (JSON 스키마가 바뀌어 --redo 필수)
+python -u batch_hud_ace_pipeline.py --redo --no-extract --only "2026-03-19 23-00-50"
+# ... §3 표의 10개 stem 각각 (또는 순차 루프)
+
+python -u _compare_hud_gt.py          # recall/precision 자동 집계
+```
+
+**완료 기준**: recall ≥ 85% (23/27↑) — 도달 못 하면 단계 4로.
+
+### 단계 4 — 미탐·오탐 개별 진단 (반복)
+
+미탐 GT 구간마다 JSON의 해당 시간대 라운드를 보고 원인 분류:
+
+| 증상 (JSON에서 확인) | 원인 | 조치 |
+|---|---|---|
+| 구간에 `kill_times`가 2개 이하 | K 전이를 놓침 — 템플릿 미비 or 판독 공백 | 해당 시각 프레임 덤프 → `locate_kda_glyphs` 결과 확인, 템플릿 보강 |
+| `kills` 4 이상 | 라운드 경계 병합 (두 라운드 킬 합산) | `hud_round_end` 스트릭/임계 튜닝, `_merge_short_rounds` min_sec 조정 |
+| `resets > 0` 인데 실제 리셋 아님 | 오독으로 가짜 리베이스 | `_REQ_REBASE` 상향(3→4), 템플릿 순도 확인 |
+| 라운드가 GT 구간을 쪼갬 | HUD 전멸 오검출 | `analyze_hud_icons` blob 면적 범위 확인 |
+| `k_row_miss` 비율 높음 | 행 탐지 실패 (배너 겹침 등) | 해당 프레임 덤프 후 `_KDA_BAND_*`/`_SLASH_SLOPE` 확인 |
+
+튜닝 가능한 상수:
+- `detect_ace_hud.py`: `_REQ_CONFIRM(2 — 3으로 올리면 막판 킬 유실!)`, `_REQ_REBASE(5)`,
+  `_KILL_GRACE_SEC(2.5)`, `_MIN_ROUND_SEC(20)`, `_MIN_ROUND_SAMPLES(4)`
+- `hud_digit_match.py`: `_K_IOU_MIN(0.55)`, `_K_IOU_MARGIN(0.06)`
+- `hud_kda.py`: `_SLASH_SLOPE(-0.30)`, `_KDA_BAND_*`
+- `harvest_hud_digits.py`: `_CLUSTER_SIM(0.75 — 0.62는 0/5/6/8 연쇄 병합됨)`
+
+⚠ **건드리지 말 것**: ace = `kills == 3` 정확히 (도메인 절대 규칙, ≥3 금지),
+리셋 라운드 ace 제외, M:SS 보고 형식.
+
+### 단계 5 — 정답 달성 후
+
+1. 라벨 10영상 클립 추출 재실행 (`--redo` 없이 `--only` + extract)
+2. 배치 37~113 재개: `python -u batch_hud_ace_pipeline.py --scan-fps 4`
+3. 이 문서 §4·§5 표 갱신 + `HANDOFF.md` 요약 갱신
 
 ---
 

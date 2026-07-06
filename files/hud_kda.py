@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
-"""라이브 HUD OCR — K/D/A 3분할 + 템플릿 매칭."""
+"""라이브 HUD OCR — K/D/A 자동 위치 탐지(빨간 blob 행) + 템플릿 매칭.
+
+2026-07-06 개편: 고정 ROI(_KDA_LINE_*)는 16:9 캘리브 영상에서만 우연히
+걸리는 수준이었고 OBS 4:3 레이아웃에선 숫자를 완전히 벗어남(판독률 0.6%).
+→ 좌측 밴드에서 빨간 글리프 행을 찾아 슬래시(/) 2개로 K/D/A를 분리하는
+`locate_kda_glyphs()`가 기본 경로. 다자리 K(누적 10+)도 지원.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
 from game_frame import extract_game_crop_bgr
-from hud_digit_match import get_hud_digit_matcher, red_mask
+from hud_digit_match import get_hud_digit_matcher, normalize_glyph, red_mask
 from scoreboard_layout import _ocr_mask_digit, get_reader
 
 _TOP_Y = (0.038, 0.092)
@@ -29,6 +35,18 @@ _K_ONLY_X = _KDA_LINE_X
 _MAX_ROUND_K = 15
 _MIN_K_CONF = 0.25
 
+# --- KDA 행 자동 탐지 (레이아웃 불문) ---
+# 좌측 밴드: 두 레이아웃 모두 숫자 행이 game 비율 gy≈0.272~0.295, gx 0.03~0.11
+_KDA_BAND_Y = (0.20, 0.34)
+_KDA_BAND_X = (0.0, 0.22)
+_GLYPH_H_MIN = 0.011   # game 높이 대비 글리프 높이 (실측 15~20px @ ~1050p)
+_GLYPH_H_MAX = 0.024
+_GLYPH_W_MAX = 0.020   # game 높이 대비 폭 상한 (배너 등 큰 blob 배제)
+_GLYPH_MIN_AREA = 12
+_ROW_Y_TOL = 4         # 같은 행 판정 y 오차(px)
+_SLASH_SLOPE = -0.30   # 행별 x-centroid 기울기: '/'는 ≈-0.45, 숫자는 |s|<0.1
+_MAX_GROUP_DIGITS = 2  # K/D/A 각 슬롯 최대 자릿수 (누적 K 2자리까지)
+
 
 @dataclass
 class HudSnapshot:
@@ -42,6 +60,107 @@ class HudSnapshot:
     k_conf: float = 0.0
     k_method: str = ""
     source: str = ""
+
+
+@dataclass
+class KdaGlyphs:
+    """탐지된 K/D/A 글리프(이진 마스크 패치, 좌→우) — 값 판독 전 단계."""
+    k: list[np.ndarray] = field(default_factory=list)
+    d: list[np.ndarray] = field(default_factory=list)
+    a: list[np.ndarray] = field(default_factory=list)
+    row_gy: float = 0.0  # game 비율 y (디버그)
+
+
+def _glyph_slope(patch: np.ndarray) -> float:
+    """행별 x-centroid 기울기. '/'는 강한 음수(≈-0.45), 숫자는 ≈0."""
+    ys, xs = np.nonzero(patch)
+    if len(xs) < 8:
+        return 0.0
+    rows: dict[int, list[int]] = {}
+    for x, y in zip(xs, ys):
+        rows.setdefault(int(y), []).append(int(x))
+    if len(rows) < 4:
+        return 0.0
+    ys_s = sorted(rows)
+    cx = [float(np.mean(rows[y])) for y in ys_s]
+    return float(np.polyfit(ys_s, cx, 1)[0])
+
+
+def locate_kda_glyphs(game_bgr: np.ndarray) -> KdaGlyphs | None:
+    """좌측 밴드에서 빨간 K/D/A 행을 찾아 슬래시 2개 기준으로 3그룹 분리.
+
+    실패(행 미발견·슬래시≠2·그룹 크기 이상) 시 None — 안전한 miss.
+    """
+    if game_bgr is None or game_bgr.size == 0:
+        return None
+    gh, gw = game_bgr.shape[:2]
+    y1, y2 = int(_KDA_BAND_Y[0] * gh), int(_KDA_BAND_Y[1] * gh)
+    x1, x2 = int(_KDA_BAND_X[0] * gw), int(_KDA_BAND_X[1] * gw)
+    band = game_bgr[y1:y2, x1:x2]
+    if band.size == 0:
+        return None
+    mask = red_mask(band)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    hmin, hmax = gh * _GLYPH_H_MIN, gh * _GLYPH_H_MAX
+    blobs = []
+    for i in range(1, n):
+        bx, by, bw, bh, area = stats[i]
+        if area < _GLYPH_MIN_AREA or not (hmin <= bh <= hmax) or bw > gh * _GLYPH_W_MAX:
+            continue
+        patch = (labels[by : by + bh, bx : bx + bw] == i).astype(np.uint8) * 255
+        blobs.append((int(bx), int(by), int(bw), int(bh), patch))
+    if len(blobs) < 5:
+        return None
+
+    # 같은 행 클러스터 (y 오차 _ROW_Y_TOL) 중 최대
+    best_row: list = []
+    for anchor in blobs:
+        row = [b for b in blobs if abs(b[1] - anchor[1]) <= _ROW_Y_TOL]
+        if len(row) > len(best_row):
+            best_row = row
+    if len(best_row) < 5:
+        return None
+    best_row.sort(key=lambda b: b[0])
+
+    slash_idx = [
+        i
+        for i, b in enumerate(best_row)
+        if _glyph_slope(b[4]) < _SLASH_SLOPE and (b[2] / max(1, b[3])) < 0.75
+    ]
+    if len(slash_idx) != 2:
+        return None
+    s1, s2 = slash_idx
+    groups = [best_row[:s1], best_row[s1 + 1 : s2], best_row[s2 + 1 :]]
+    if any(not (1 <= len(g) <= _MAX_GROUP_DIGITS) for g in groups):
+        return None
+    return KdaGlyphs(
+        k=[b[4] for b in groups[0]],
+        d=[b[4] for b in groups[1]],
+        a=[b[4] for b in groups[2]],
+        row_gy=(y1 + best_row[0][1]) / gh,
+    )
+
+
+def _read_digit_group(
+    patches: list[np.ndarray],
+    matcher,
+) -> tuple[int | None, float]:
+    """글리프 마스크 리스트(좌→우) → 다자리 정수. 하나라도 미매칭이면 None."""
+    from hud_digit_match import match_glyph_iou
+
+    digits: list[int] = []
+    min_score = 1.0
+    for p in patches:
+        glyph = normalize_glyph(p)
+        d, sc = match_glyph_iou(glyph, matcher.k_templates)
+        if d is None:
+            return None, max(0.0, sc)
+        digits.append(d)
+        min_score = min(min_score, sc)
+    val = 0
+    for d in digits:
+        val = val * 10 + d
+    return val, min_score
 
 
 def _crop_ratio(img: np.ndarray, y: tuple[float, float], x: tuple[float, float]) -> np.ndarray:
@@ -107,18 +226,27 @@ def read_k_digit(crop_bgr: np.ndarray, *, template_only: bool = False) -> tuple[
     return None, max(sc, 0.0), "miss"
 
 
+_MAX_CUM_K = 60  # 매치 누적 K 상한 (오독 가드)
+
+
 def read_kda_triple_from_game(
     game_bgr: np.ndarray,
     *,
     template_only: bool = False,
 ) -> tuple[int | None, int | None, int | None, float, str]:
-    nums = _kda_numbers_crop(game_bgr)
-    kc, dc, ac = _split_kda_crops(nums)
-    k, kconf, km = read_k_digit(kc, template_only=template_only)
+    """KDA 행 자동 탐지 → 템플릿 판독. K는 매치 누적값(다자리 가능)."""
+    glyphs = locate_kda_glyphs(game_bgr)
+    if glyphs is None:
+        return None, None, None, 0.0, "row_miss"
+    matcher = get_hud_digit_matcher()
+    k, kconf = _read_digit_group(glyphs.k, matcher)
+    if k is not None and not (0 <= k <= _MAX_CUM_K):
+        k, kconf = None, 0.0
+    km = "template" if k is not None else "template_miss"
     if template_only:
         return k, None, None, kconf, km
-    d, _, _ = read_k_digit(dc)
-    a, _, _ = read_k_digit(ac)
+    d, _ = _read_digit_group(glyphs.d, matcher)
+    a, _ = _read_digit_group(glyphs.a, matcher)
     return k, d, a, kconf, km
 
 

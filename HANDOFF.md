@@ -3,13 +3,14 @@
 > 마지막 업데이트: 2026-07-06 (KST)  
 > 다음 채팅에서 이 파일을 먼저 읽고 이어서 작업하세요.
 
-## ★ HUD 올킬 파이프라인 (2026-07-06)
+## ★ HUD 올킬 파이프라인 (2026-07-06 개편)
 
-**닉·스코어보드 없이** HUD K/D/A로 올킬 탐지 — 배치 **36/113** 완료 후 중단.
+**닉·스코어보드 없이** HUD K/D/A로 올킬 탐지.
 
-- **상세 핸드오프**: [`HUD_ACE_HANDOFF.md`](HUD_ACE_HANDOFF.md) ← 정답 27건 라벨 + 배치 결과 + recall 분석
-- **코드**: `files/detect_ace_hud.py`, `batch_hud_ace_pipeline.py`, `hud_kda.py`, `hud_round_end.py`
-- **현황**: 라벨 10영상 recall ≈ 0%; K 템플릿 부족·라운드 병합이 주 원인
+- **상세 핸드오프**: [`HUD_ACE_HANDOFF.md`](HUD_ACE_HANDOFF.md) ← **§0 개편 내용 + §7 수행 가이드 필독**
+- **recall 0% 원인 확정**: 고정 KDA ROI가 OBS 4:3 레이아웃에서 숫자를 완전히 벗어남(판독률 0.6%) + 기존 템플릿은 조각 글리프 불량품
+- **개편 완료**: KDA 행 자동탐지(`locate_kda_glyphs`, 레이아웃 불문·다자리 K) + `_KTracker` 킬 이벤트 상태머신 + `harvest_hud_digits.py`(클러스터 수확) + `_compare_hud_gt.py`(GT 27건 자동 대조)
+- **남은 작업**: 템플릿 수확·설치 → 라벨 10영상 재스캔 → GT 대조 튜닝 → 배치 37~113 (§7 순서대로)
 
 ## 보고·도메인 규칙 (2026-06-26 확정)
 

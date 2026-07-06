@@ -13,6 +13,9 @@ DEFAULT_TEMPLATE_DIR = Path(__file__).parent / "hud_templates"
 _GLYPH_SIZE = (24, 32)
 _MATCH_MIN_SCORE = 0.52
 _K_MATCH_MIN = 0.50
+# IoU 매칭 (K 숫자 경로) — TM_CCOEFF는 박스형 폰트(0/5/6)에서 변별력 부족(실측)
+_K_IOU_MIN = 0.55
+_K_IOU_MARGIN = 0.06   # 1등-2등 IoU 차이가 이보다 작으면 모호 → None (안전 미스)
 
 
 def red_mask(crop_bgr: np.ndarray) -> np.ndarray:
@@ -32,6 +35,10 @@ def white_mask(crop_bgr: np.ndarray, thresh: int = 155) -> np.ndarray:
 
 
 def normalize_glyph(mask: np.ndarray) -> np.ndarray | None:
+    """글리프 마스크 → 24x32 letterbox (가로세로비 보존, 중앙 정렬).
+
+    스트레치 방식은 '1'도 꽉 찬 블록이 되어 숫자 간 변별력이 사라짐(2026-07-06).
+    """
     if mask is None or mask.size == 0:
         return None
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -42,7 +49,13 @@ def normalize_glyph(mask: np.ndarray) -> np.ndarray | None:
     if w * h < 20:
         return None
     g = mask[y : y + h, x : x + w]
-    return cv2.resize(g, _GLYPH_SIZE, interpolation=cv2.INTER_AREA)
+    tw, th = _GLYPH_SIZE
+    nw = max(1, min(tw, int(round(w * th / h))))
+    g = cv2.resize(g, (nw, th), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((th, tw), dtype=np.uint8)
+    x0 = (tw - nw) // 2
+    canvas[:, x0 : x0 + nw] = g
+    return canvas
 
 
 def leftmost_red_glyph(crop_bgr: np.ndarray) -> np.ndarray | None:
@@ -66,22 +79,65 @@ def leftmost_red_glyph(crop_bgr: np.ndarray) -> np.ndarray | None:
 
 def match_glyph(
     glyph: np.ndarray | None,
-    templates: dict[int, np.ndarray],
+    templates: dict,
     min_score: float,
 ) -> tuple[int | None, float]:
+    """키는 int 또는 '3_b' 같은 변형 문자열 — 앞 숫자만 취함 (레이아웃별 보조 템플릿)."""
     if glyph is None or not templates:
         return None, 0.0
-    best_digit: int | None = None
+    best_key = None
     best_score = -1.0
-    for digit, tmpl in templates.items():
+    for key, tmpl in templates.items():
         if tmpl.shape != glyph.shape:
             tmpl = cv2.resize(tmpl, _GLYPH_SIZE, interpolation=cv2.INTER_AREA)
         score = float(cv2.matchTemplate(glyph, tmpl, cv2.TM_CCOEFF_NORMED).max())
         if score > best_score:
-            best_score, best_digit = score, digit
-    if best_digit is not None and best_score >= min_score:
-        return best_digit, best_score
+            best_score, best_key = score, key
+    if best_key is not None and best_score >= min_score:
+        return int(str(best_key).split("_")[0]), best_score
     return None, max(0.0, best_score)
+
+
+def _iou_shifted(a: np.ndarray, b: np.ndarray) -> float:
+    """이진 글리프 IoU — letterbox 정렬 지터(±1px) 흡수를 위해 x/y 시프트 탐색."""
+    ab = a > 127
+    best = 0.0
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            bb = np.roll(b, (dy, dx), axis=(0, 1)) > 127
+            union = np.logical_or(ab, bb).sum()
+            if union == 0:
+                continue
+            iou = np.logical_and(ab, bb).sum() / union
+            if iou > best:
+                best = float(iou)
+    return best
+
+
+def match_glyph_iou(
+    glyph: np.ndarray | None,
+    templates: dict,
+    min_score: float = _K_IOU_MIN,
+    min_margin: float = _K_IOU_MARGIN,
+) -> tuple[int | None, float]:
+    """IoU + 마진 매칭: 1등이 min_score 이상이고 2등(다른 숫자)과 min_margin 이상
+    차이날 때만 채택. 모호하면 None — 상태머신이 미스로 안전 처리."""
+    if glyph is None or not templates:
+        return None, 0.0
+    by_digit: dict[int, float] = {}
+    for key, tmpl in templates.items():
+        if tmpl.shape != glyph.shape:
+            tmpl = cv2.resize(tmpl, _GLYPH_SIZE, interpolation=cv2.INTER_AREA)
+        digit = int(str(key).split("_")[0])
+        s = _iou_shifted(glyph, tmpl)
+        if s > by_digit.get(digit, 0.0):
+            by_digit[digit] = s
+    ranked = sorted(by_digit.items(), key=lambda kv: -kv[1])
+    best_digit, best = ranked[0]
+    second = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best >= min_score and (best - second) >= min_margin:
+        return best_digit, best
+    return None, best
 
 
 class HudDigitMatcher:
@@ -103,10 +159,11 @@ class HudDigitMatcher:
         if d.is_dir():
             for p in d.glob("k_*.png"):
                 try:
-                    digit = int(p.stem.split("_", 1)[1])
+                    key = p.stem.split("_", 1)[1]  # "3" 또는 "3_b" (변형)
+                    int(key.split("_")[0])  # 숫자 검증
                     img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
                     if img is not None:
-                        k_t[digit] = cv2.resize(img, _GLYPH_SIZE, interpolation=cv2.INTER_AREA)
+                        k_t[key] = cv2.resize(img, _GLYPH_SIZE, interpolation=cv2.INTER_AREA)
                 except ValueError:
                     pass
             for p in d.glob("white_*.png"):
@@ -215,7 +272,14 @@ def get_hud_digit_matcher() -> HudDigitMatcher:
     if _matcher is None:
         _matcher = HudDigitMatcher.from_template_dir()
         if not _matcher.k_templates:
-            _matcher = _build_default_matcher()
+            # 자동 캘리브(_build_default_matcher)는 구 고정 ROI 기반이라
+            # 조각 글리프를 템플릿으로 만드는 함정 → 사용 금지 (2026-07-06).
+            # harvest_hud_digits.py 로 수확·설치할 것.
+            print(
+                "[hud_digit_match] ⚠ hud_templates/ 비어있음 — "
+                "harvest_hud_digits.py --harvest/--cluster/--install 필요",
+                flush=True,
+            )
     return _matcher
 
 

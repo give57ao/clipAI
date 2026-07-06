@@ -109,6 +109,11 @@ def parse_args() -> argparse.Namespace:
         help="WIN/DEFEAT 모델 확률 임계값(0~1). 높을수록 엄격",
     )
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--no-hud", action="store_true",
+        help="HUD 인원 아이콘 스캔(영상 추가 풀패스) 생략 — 배치 속도용. "
+             "k-reader/라운드 결과엔 영향 없음 (보조 휴리스틱)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="CSV 저장 안 함")
     return parser.parse_args()
 
@@ -442,13 +447,17 @@ def main() -> int:
 
     rounds = rounds_from_windows(windows, duration)
 
-    hud_ends = scan_hud_round_ends(video_path, scan_fps=args.hud_scan_fps)
-    print(f"[rounds] hud round_ends={len(hud_ends)} (CV heuristic, not ML)")
-    for event in hud_ends:
-        print(
-            f"  HUD end {event.time_sec:7.1f}s eliminated={event.eliminated_team} "
-            f"(R={event.red_icons} B={event.blue_icons})"
-        )
+    if args.no_hud:
+        hud_ends = []
+        print("[rounds] HUD 스캔 생략 (--no-hud)")
+    else:
+        hud_ends = scan_hud_round_ends(video_path, scan_fps=args.hud_scan_fps)
+        print(f"[rounds] hud round_ends={len(hud_ends)} (CV heuristic, not ML)")
+        for event in hud_ends:
+            print(
+                f"  HUD end {event.time_sec:7.1f}s eliminated={event.eliminated_team} "
+                f"(R={event.red_icons} B={event.blue_icons})"
+            )
 
     if args.require_hud_round_end:
         before = len(windows)

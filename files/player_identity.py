@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from game_frame import get_game_roi_predictor
-from nick_fuzzy import cluster_votes, clusters_to_summary, nick_match_text
+from nick_fuzzy import cluster_votes, clusters_to_summary, nick_core, nick_match_text
 from scoreboard_layout import (
     collect_scoreboard_nick_votes,
     find_scoreboard_csv,
@@ -91,7 +91,7 @@ def _collect_scouter_votes(
             votes.append(
                 {
                     "text": readout.player_nick,
-                    "weight": 1.0,
+                    "weight": 2.5,
                     "conf": readout.player_conf,
                     "mode": readout.mode,
                     "kind": "strong",
@@ -143,6 +143,63 @@ def _cross_source_bonus(scouter_votes: list[dict], cross_votes: list[dict]) -> f
         if any(nick_match_text(vote["text"], cv["text"]) for cv in cross_votes):
             confirmed += 1
     return min(1.0, confirmed / len(strong))
+
+
+# 확정 게이트 미통과 시 — 핵심부 유사도로 폴백 (특수문자·잘림 닉)
+_SOFT_MIN_SAMPLES = 2
+_SOFT_MIN_CORE_LEN = 3
+_SOFT_DOMINANCE = 0.38  # 1위/(1위+2위) 가중치 비율
+
+
+def _cluster_for_scouter(clusters: list[dict], scouter_votes: list[dict]) -> dict | None:
+    """스카우터(● 행) 닉과 일치하는 클러스터 — 본인 확정에 최우선."""
+    strong = [v for v in scouter_votes if v.get("kind") == "strong"]
+    if not strong:
+        return None
+    for cluster in clusters:
+        for member in cluster.get("members", []):
+            for sv in strong:
+                if nick_match_text(member.get("text", ""), sv["text"]):
+                    return cluster
+    return None
+
+
+def _try_soft_accept(
+    clusters: list[dict],
+    scouter_votes: list[dict] | None = None,
+) -> tuple[str, float] | None:
+    """엄격 확정 실패 시 핵심부 닉으로 폴백. None이면 진짜 스킵."""
+    if not clusters:
+        return None
+
+    # 스카우터 본인 행이 있으면 weight 순위보다 우선
+    scouter_cluster = _cluster_for_scouter(clusters, scouter_votes or [])
+    top = scouter_cluster or clusters[0]
+
+    # 한 클러스터에 다른 계열 닉이 섞였으면 표 많은 핵심부로 분리
+    core_weights: dict[str, float] = {}
+    for member in top.get("members", []):
+        c = nick_core(member.get("text", ""))
+        if len(c) >= _SOFT_MIN_CORE_LEN:
+            core_weights[c] = core_weights.get(c, 0.0) + member.get("weight", 1.0)
+    if len(core_weights) >= 2:
+        best_core = max(core_weights.items(), key=lambda kv: kv[1])[0]
+        top = {**top, "canonical": best_core, "core": best_core}
+
+    core = nick_core(top.get("canonical", ""))
+    if len(core) < _SOFT_MIN_CORE_LEN:
+        return None
+    if top["samples"] < _SOFT_MIN_SAMPLES and scouter_cluster is None:
+        return None
+    if scouter_cluster is None and len(clusters) >= 2:
+        w_top = top["weight"]
+        w_second = clusters[1]["weight"]
+        if w_top + w_second > 0 and w_top / (w_top + w_second) < _SOFT_DOMINANCE:
+            return None
+    conf = min(0.55, top.get("best_conf", 0.3) * 0.65 + 0.15)
+    if scouter_cluster is not None:
+        conf = min(0.65, conf + 0.1)
+    return core, conf
 
 
 def resolve_player_identity(
@@ -243,6 +300,14 @@ def resolve_player_identity(
     )
 
     accepted = top["samples"] >= min_votes and confidence >= min_conf
+
+    # 스카우터 본인 행이 확실하면 confidence 미달이어도 확정
+    scouter_cluster = _cluster_for_scouter(clusters, scouter_votes)
+    if not accepted and scouter_cluster is not None:
+        top = scouter_cluster
+        accepted = top["samples"] >= 1
+        confidence = max(confidence, min(0.6, scouter_cluster.get("best_conf", 0.5)))
+        sources["scouter_boost"] = True
     sources.update(
         {
             "vote_ratio": round(vote_ratio, 3),
@@ -253,6 +318,21 @@ def resolve_player_identity(
     )
 
     if not accepted:
+        soft = _try_soft_accept(clusters, scouter_votes)
+        if soft is not None:
+            soft_nick, soft_conf = soft
+            sources["reason"] = "soft_core_match"
+            sources["accepted_soft"] = True
+            sources["canonical_raw"] = top["canonical"]
+            return PlayerIdentity(
+                nickname=soft_nick,
+                confidence=round(soft_conf, 3),
+                mode=dominant_mode,
+                sources=sources,
+                game_width_median=game_width_median,
+                samples_total=samples_total,
+                samples_hit=samples_hit,
+            )
         sources["reason"] = "low_votes" if top["samples"] < min_votes else "low_confidence"
         return PlayerIdentity(
             "", round(confidence, 3), dominant_mode, sources,
@@ -290,7 +370,13 @@ def format_report(video_path: Path, identity: PlayerIdentity) -> str:
             f"variants={cluster['variants']}"
         )
     if not src.get("accepted", False):
-        lines.append(f"  [!] 확정 실패 (reason={src.get('reason')}) → 파이프라인 SKIP 권장")
+        if src.get("accepted_soft"):
+            lines.append(
+                f"  [~] 유사도 폴백 확정 (reason={src.get('reason')}, "
+                f"raw={src.get('canonical_raw', '')!r})"
+            )
+        else:
+            lines.append(f"  [!] 확정 실패 (reason={src.get('reason')}) → 파이프라인 SKIP 권장")
     return "\n".join(lines)
 
 

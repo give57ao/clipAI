@@ -41,8 +41,11 @@ def get_reader():
     global _reader
     if _reader is None:
         import easyocr
+        import torch
 
-        _reader = easyocr.Reader(["ko", "en"], gpu=False, verbose=False)
+        # GPU 있으면 자동 사용 (OCR ~10x 빠름), 없으면 CPU 폴백.
+        use_gpu = torch.cuda.is_available()
+        _reader = easyocr.Reader(["ko", "en"], gpu=use_gpu, verbose=False)
     return _reader
 
 

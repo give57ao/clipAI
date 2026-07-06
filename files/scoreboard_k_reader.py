@@ -9,13 +9,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import cv2
 
-from nick_fuzzy import normalize_nick, nick_match_text
+from nick_fuzzy import normalize_nick, nick_match_text, nick_core, cores_match
 from player_identity import PlayerIdentity, resolve_player_identity
 from scoreboard_layout import (
     ScoreboardRow,
@@ -23,11 +28,17 @@ from scoreboard_layout import (
     find_scoreboard_csv,
     load_scoreboard_windows,
     read_scoreboard_rows,
+    read_team_wins,
+    team_kills_sum,
 )
 from scouter_nick import levenshtein
 
 DEFAULT_DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 ACE_KILL_THRESHOLD = 3
+# 직전 스코어보드 대비 플레이 구간이 중앙값의 N배 초과 → 중간 라운드 누락 의심
+PLAY_GAP_ACE_MAX_RATIO = 1.55
+# 직전 라운드 올킬 직후 또 ΔK=3 + 짧은 플레이 구간 → 중간 SB 누락(2+1 합산) 의심
+PLAY_GAP_CONSECUTIVE_ACE_MAX_RATIO = 0.55
 
 
 @dataclass
@@ -38,11 +49,21 @@ class RoundKillReadout:
     kills: int | None
     nick_matched: str
     match_score: float
+    deaths: int | None = None
+    team_k_sum: int | None = None
+    red_wins: int | None = None
+    blue_wins: int | None = None
+    play_gap_sec: float | None = None
     row_index: int | None = None
     samples_used: int = 0
     rejoin_reset: bool = False
     # 안전장치: 팀 고정 + K 연속성으로 추론한 경우 True (재검증 필요)
     inferred_by_team: bool = False
+    # ΔK >= 4 → OCR 오류 의심 (올킬 아님)
+    k_read_error: bool = False
+    ace_reject_reason: str = ""
+    # 올킬 '후보' (직접매칭/인접성 등 게이트 미통과) — 리콜 확보용
+    ace_candidate_reason: str = ""
     # 안전장치에서 후보로 올라온 팀원 닉/K 목록 (디버그용)
     team_candidates: list[dict] = field(default_factory=list)
 
@@ -51,9 +72,14 @@ class RoundKillReadout:
 class VideoKillTimeline:
     video_path: str
     player_nick: str
+    # 레이아웃 진단용 (스카우터 기반)
+    game_width_median: int = 0
+    layout: str = ""
     rounds: list[RoundKillReadout] = field(default_factory=list)
     delta_kills: list[int | None] = field(default_factory=list)
     ace_rounds: list[int] = field(default_factory=list)
+    ace_candidates: list[int] = field(default_factory=list)
+    k_error_rounds: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     # 팀 고정으로 라운드 수 / 안전장치 사용 수
     team_lock_rounds: int = 0
@@ -70,6 +96,13 @@ def nick_match_score(player_nick: str, row_nick: str) -> float:
     if not player_nick or not row_nick:
         return 0.0
     if not nick_match_text(player_nick, row_nick):
+        # 핵심부 포함 매칭 (특수문자·잘림 닉)
+        if cores_match(player_nick, row_nick):
+            ca, cb = nick_core(player_nick), nick_core(row_nick)
+            if ca and cb:
+                shorter = min(len(ca), len(cb))
+                longer = max(len(ca), len(cb))
+                return 0.82 + 0.18 * (shorter / longer) if longer else 0.82
         return 0.0
     a, b = normalize_nick(player_nick), normalize_nick(row_nick)
     if a == b:
@@ -262,6 +295,69 @@ def sample_times_in_window(window: ScoreboardWindow, count: int = 3) -> list[flo
     return [t_start + (t_end - t_start) * i / (count - 1) for i in range(count)]
 
 
+def dense_sample_times_in_window(
+    window: ScoreboardWindow,
+    *,
+    step_sec: float = 0.4,
+) -> list[float]:
+    """닉 매칭 실패 시 스코어보드 전체(~4초)를 촘촘히 재스캔."""
+    duration = window.end_sec - window.start_sec
+    if duration <= 0:
+        return [window.mid_sec]
+    # 페이드 인/아웃 여유만 두고 구간 전체를 훑음
+    margin = min(0.25, duration * 0.05)
+    t_start = window.start_sec + margin
+    t_end = window.end_sec - margin
+    if t_end <= t_start:
+        return [window.mid_sec]
+    times: list[float] = []
+    t = t_start
+    while t <= t_end + 1e-6:
+        times.append(t)
+        t += step_sec
+    return times
+
+
+def _collect_frame_hits(
+    cap: cv2.VideoCapture,
+    fps: float,
+    sample_secs: list[float],
+    player_nick: str,
+    *,
+    nick_match_threshold: float,
+    dataset_root: Path | None,
+) -> tuple[
+    list[tuple[float, ScoreboardRow]],
+    list[ScoreboardRow],
+    list[ScoreboardRow],
+    object | None,
+    int,
+]:
+    """샘플 시각마다 닉 매칭 행 수집."""
+    frame_hits: list[tuple[float, ScoreboardRow]] = []
+    all_rows_seen: list[ScoreboardRow] = []
+    last_rows: list[ScoreboardRow] = []
+    last_frame = None
+    samples_used = 0
+
+    for sample_sec in sample_secs:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(sample_sec * fps))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        samples_used += 1
+        last_frame = frame
+        rows = read_scoreboard_rows(frame, dataset_root=dataset_root)
+        last_rows = rows
+        all_rows_seen.extend(rows)
+        for score, row in _rows_matching_player(
+            rows, player_nick, nick_match_threshold=nick_match_threshold
+        ):
+            frame_hits.append((score, row))
+
+    return frame_hits, all_rows_seen, last_rows, last_frame, samples_used
+
+
 def _majority_k(values: list[int]) -> int | None:
     if not values:
         return None
@@ -269,6 +365,24 @@ def _majority_k(values: list[int]) -> int | None:
     if count >= 2 or len(values) == 1:
         return top
     return top
+
+
+def _filter_death_ocr_glitch(
+    candidates: list[int],
+    prev_deaths: int | None,
+) -> list[int]:
+    """D열 10·20·30 누적 오독(어시스트 열 혼입) 후보 제거."""
+    if not candidates:
+        return candidates
+    filtered: list[int] = []
+    for d in candidates:
+        if d >= 10 and d % 10 == 0:
+            if prev_deaths is not None and d - prev_deaths == 10:
+                continue
+            if prev_deaths is None and d >= 10:
+                continue
+        filtered.append(d)
+    return filtered if filtered else candidates
 
 
 def read_round_kill(
@@ -282,27 +396,37 @@ def read_round_kill(
     frame_samples: int = 3,
     dataset_root: Path | None = None,
     _rows_cache: dict | None = None,
+    prev_deaths: int | None = None,
 ) -> RoundKillReadout:
     """한 스코어보드 구간에서 본인 K 읽기 (프레임 다수결)."""
-    frame_hits: list[tuple[float, ScoreboardRow]] = []
     kill_candidates: list[int] = []
-    samples_used = 0
-    all_rows_seen: list[ScoreboardRow] = []
+    death_candidates: list[int] = []
+    last_rows: list[ScoreboardRow] = []
+    last_frame = None
 
-    for sample_sec in sample_times_in_window(window, frame_samples):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(sample_sec * fps))
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            continue
-        samples_used += 1
-        rows = read_scoreboard_rows(frame, dataset_root=dataset_root)
-        all_rows_seen.extend(rows)
-        for score, row in _rows_matching_player(
-            rows, player_nick, nick_match_threshold=nick_match_threshold
-        ):
-            frame_hits.append((score, row))
-            if row.kills is not None:
-                kill_candidates.append(row.kills)
+    sample_secs = sample_times_in_window(window, frame_samples)
+    frame_hits, all_rows_seen, last_rows, last_frame, samples_used = _collect_frame_hits(
+        cap, fps, sample_secs, player_nick,
+        nick_match_threshold=nick_match_threshold,
+        dataset_root=dataset_root,
+    )
+
+    # 1차 실패 → 스코어보드 유지 구간(~4초) 전체를 0.4초 간격 재스캔
+    if not frame_hits:
+        dense_secs = dense_sample_times_in_window(window)
+        dense_hits, dense_rows, dense_last_rows, dense_frame, dense_n = _collect_frame_hits(
+            cap, fps, dense_secs, player_nick,
+            nick_match_threshold=nick_match_threshold,
+            dataset_root=dataset_root,
+        )
+        if dense_hits:
+            frame_hits = dense_hits
+            all_rows_seen.extend(dense_rows)
+            if dense_last_rows:
+                last_rows = dense_last_rows
+            if dense_frame is not None:
+                last_frame = dense_frame
+            samples_used += dense_n
 
     # 안전장치용 캐시: 마지막 샘플 프레임의 6행 저장
     if _rows_cache is not None and all_rows_seen:
@@ -325,19 +449,38 @@ def read_round_kill(
 
     best_score, matched_row = max(frame_hits, key=lambda item: item[0])
 
-    # 닉 매칭 프레임에서 K를 못 읽은 경우, 동일 row_index의 다른 프레임 K도 포함
-    if not kill_candidates:
-        kill_candidates = [
-            r.kills for r in all_rows_seen
-            if r.row_index == matched_row.row_index and r.kills is not None
-        ]
+    # 동일 row_index + 닉 일치 프레임만 K/D 수집 (다른 행 OCR 혼입 방지)
+    kill_candidates = [
+        r.kills for r in all_rows_seen
+        if r.row_index == matched_row.row_index
+        and nick_match_score(player_nick, r.nickname) >= nick_match_threshold
+        and r.kills is not None
+    ]
+    death_candidates = [
+        r.deaths for r in all_rows_seen
+        if r.row_index == matched_row.row_index
+        and nick_match_score(player_nick, r.nickname) >= nick_match_threshold
+        and r.deaths is not None
+    ]
+
+    death_candidates = _filter_death_ocr_glitch(death_candidates, prev_deaths)
 
     kills = _majority_k(kill_candidates)
+    deaths = _majority_k(death_candidates)
+    team_k = team_kills_sum(last_rows, matched_row.team) if last_rows else None
+    red_w, blue_w = (None, None)
+    if last_frame is not None:
+        red_w, blue_w = read_team_wins(last_frame, dataset_root=dataset_root)
+
     return RoundKillReadout(
         round_index=round_index,
         scoreboard_start_sec=window.start_sec,
         scoreboard_end_sec=window.end_sec,
         kills=kills,
+        deaths=deaths,
+        team_k_sum=team_k,
+        red_wins=red_w,
+        blue_wins=blue_w,
         nick_matched=matched_row.nickname,
         match_score=round(best_score, 3),
         row_index=matched_row.row_index,
@@ -345,15 +488,57 @@ def read_round_kill(
     )
 
 
+def _median_play_gap(scoreboards: list[ScoreboardWindow]) -> float:
+    gaps = []
+    for i in range(1, len(scoreboards)):
+        g = scoreboards[i].start_sec - scoreboards[i - 1].end_sec
+        if g > 0:
+            gaps.append(g)
+    if not gaps:
+        return 45.0
+    gaps.sort()
+    return gaps[len(gaps) // 2]
+
+
+def _player_team_wins(readout: RoundKillReadout) -> int | None:
+    if readout.row_index is None:
+        return None
+    if readout.row_index < 3:
+        return readout.red_wins
+    return readout.blue_wins
+
+
+def _match_rounds_total(readout: RoundKillReadout) -> int | None:
+    if readout.red_wins is None or readout.blue_wins is None:
+        return None
+    return readout.red_wins + readout.blue_wins
+
+
 def compute_delta_kills(
     readouts: list[RoundKillReadout],
     *,
     ace_threshold: int = ACE_KILL_THRESHOLD,
-) -> tuple[list[int | None], list[int]]:
-    """라운드 간 ΔK + 올킬(ΔK>=3) 라운드 인덱스. 리조인 시 기준점 리셋."""
+    median_play_gap: float = 45.0,
+) -> tuple[list[int | None], list[int], list[int], list[int]]:
+    """라운드 간 ΔK + 올킬(ΔK==3) / K 읽기 오류(ΔK>=4) 라운드 인덱스.
+
+    올킬 추가 검증 (2026-06-29):
+      - 직접매칭 + 인접 라운드
+      - 플레이 구간이 중앙값 대비 과대 → 중간 라운드 누락
+      - 경기 총 라운드(레드승+블루승) 증가가 1이 아니면 단일 라운드 올킬 아님
+      - 플레이어 팀 승리라운드 증가가 1이 아니면 해당 라운드 미승리
+    """
     deltas: list[int | None] = []
     ace_rounds: list[int] = []
+    ace_candidates: list[int] = []
+    k_error_rounds: list[int] = []
     prev_kills: int | None = None
+    prev_deaths: int | None = None
+    prev_inferred: bool = False
+    prev_round_index: int | None = None
+    prev_pt_wins: int | None = None
+    prev_match_total: int | None = None
+    prev_team_k_sum: int | None = None
 
     for readout in readouts:
         kills = readout.kills
@@ -364,21 +549,127 @@ def compute_delta_kills(
         if prev_kills is None:
             deltas.append(None)
             prev_kills = kills
+            prev_deaths = readout.deaths
+            prev_inferred = readout.inferred_by_team
+            prev_round_index = readout.round_index
+            prev_pt_wins = _player_team_wins(readout)
+            prev_match_total = _match_rounds_total(readout)
+            prev_team_k_sum = readout.team_k_sum
             continue
 
         if kills < prev_kills:
             readout.rejoin_reset = True
             deltas.append(None)
             prev_kills = kills
+            prev_deaths = readout.deaths
+            prev_inferred = readout.inferred_by_team
+            prev_round_index = readout.round_index
+            prev_pt_wins = _player_team_wins(readout)
+            prev_match_total = _match_rounds_total(readout)
+            prev_team_k_sum = readout.team_k_sum
             continue
 
         delta = kills - prev_kills
         deltas.append(delta)
-        if delta >= ace_threshold:
-            ace_rounds.append(readout.round_index)
-        prev_kills = kills
 
-    return deltas, ace_rounds
+        both_direct = (not readout.inferred_by_team) and (not prev_inferred)
+        adjacent = prev_round_index is not None and readout.round_index == prev_round_index + 1
+
+        if delta > ace_threshold:
+            readout.k_read_error = True
+            k_error_rounds.append(readout.round_index)
+        elif delta == ace_threshold and adjacent:
+            # 기본 게이트: 직접매칭+인접 라운드만 "확정 올킬"
+            # 단, 클립이 너무 적을 때를 위해 직접매칭이 아니면 "후보"로 따로 수집한다.
+            reject = ""
+
+            gap = readout.play_gap_sec
+            if gap is not None and median_play_gap > 0:
+                if gap > median_play_gap * PLAY_GAP_ACE_MAX_RATIO:
+                    reject = f"play_gap_wide({gap:.0f}s>{median_play_gap*PLAY_GAP_ACE_MAX_RATIO:.0f}s)"
+                elif (
+                    prev_round_index is not None
+                    and prev_round_index in ace_rounds
+                    and gap < median_play_gap * PLAY_GAP_CONSECUTIVE_ACE_MAX_RATIO
+                ):
+                    reject = (
+                        f"consecutive_ace_short_gap({gap:.0f}s"
+                        f"<{median_play_gap*PLAY_GAP_CONSECUTIVE_ACE_MAX_RATIO:.0f}s)"
+                    )
+
+            cur_total = _match_rounds_total(readout)
+            if not reject and prev_match_total is not None and cur_total is not None:
+                round_passed = cur_total - prev_match_total
+                if round_passed != 1:
+                    reject = f"match_rounds_delta={round_passed}"
+
+            cur_pt = _player_team_wins(readout)
+            if not reject and prev_pt_wins is not None and cur_pt is not None:
+                if cur_pt - prev_pt_wins != 1:
+                    reject = f"team_wins_delta={cur_pt - prev_pt_wins}"
+
+            # 팀 K 합산(가능할 때만): 플레이어 ΔK=3인데 팀 합산 증가가 3 미만이면 물리적으로 불가능
+            if (
+                not reject
+                and prev_team_k_sum is not None
+                and readout.team_k_sum is not None
+                and (readout.team_k_sum - prev_team_k_sum) < ace_threshold
+            ):
+                reject = f"team_k_sum_delta={readout.team_k_sum - prev_team_k_sum}"
+
+            # D 증가 = 해당 라운드 사망 (라벨: 죽음/사망/1킬1데스) → 올킬 클립 아님
+            if (
+                not reject
+                and prev_deaths is not None
+                and readout.deaths is not None
+                and readout.deaths > prev_deaths
+            ):
+                reject = f"deaths_increased({prev_deaths}->{readout.deaths})"
+
+            # K/D 교차(약한 신호): 데스 동일이면 "더블킬일 수도" 있으나,
+            # 실제 올킬(ΔK=3)도 데스가 그대로일 수 있어 확정 거절로 쓰면 리콜이 크게 떨어진다.
+            # 따라서 reject 대신 candidate 사유로만 기록한다.
+            if (
+                not reject
+                and prev_deaths is not None
+                and readout.deaths is not None
+                and readout.deaths == prev_deaths
+                and delta == ace_threshold
+            ):
+                readout.ace_candidate_reason = readout.ace_candidate_reason or "kd_same_deaths_check"
+
+            # D=0 갑자기 등장 + 이전 D>0 → K열 OCR 오염 (R39 스코프 워터마크)
+            if (
+                not reject
+                and prev_deaths is not None
+                and readout.deaths == 0
+                and prev_deaths >= 1
+                and delta == ace_threshold
+            ):
+                reject = "deaths_read_zero"
+
+            if reject:
+                readout.ace_reject_reason = reject
+            else:
+                if both_direct:
+                    ace_rounds.append(readout.round_index)
+                else:
+                    # 후보도 품질 하한선을 둔다 (라벨링된 오답 다수가 inferred 저신뢰)
+                    if readout.match_score < 0.55:
+                        readout.ace_reject_reason = "cand_match_low"
+                    else:
+                        readout.ace_candidate_reason = readout.ace_candidate_reason or "inferred_or_non_direct"
+                        ace_candidates.append(readout.round_index)
+
+        prev_kills = kills
+        prev_deaths = readout.deaths
+        prev_inferred = readout.inferred_by_team
+        prev_round_index = readout.round_index
+        prev_pt_wins = _player_team_wins(readout)
+        prev_match_total = _match_rounds_total(readout)
+        prev_team_k_sum = readout.team_k_sum
+
+    return deltas, ace_rounds, ace_candidates, k_error_rounds
 
 
 def read_kills_per_round(
@@ -395,6 +686,8 @@ def read_kills_per_round(
     timeline = VideoKillTimeline(
         video_path=str(video_path),
         player_nick=identity.nickname,
+        game_width_median=int(getattr(identity, "game_width_median", 0) or 0),
+        layout=("후원패널형" if (getattr(identity, "game_width_median", 0) or 0) and (getattr(identity, "game_width_median", 0) or 0) < 1800 else "풀스크린형"),
     )
 
     if not identity.nickname:
@@ -415,6 +708,7 @@ def read_kills_per_round(
     readouts: list[RoundKillReadout] = []
     frame_rows_cache: dict[int, list[ScoreboardRow]] = {}
 
+    prev_deaths_track: int | None = None
     for idx, window in enumerate(scoreboards):
         readout = read_round_kill(
             cap,
@@ -426,8 +720,11 @@ def read_kills_per_round(
             frame_samples=frame_samples,
             dataset_root=dataset_root,
             _rows_cache=frame_rows_cache,
+            prev_deaths=prev_deaths_track,
         )
         readouts.append(readout)
+        if readout.deaths is not None:
+            prev_deaths_track = readout.deaths
 
     # 전역 팀 고정 정보 — 영상 전체 성공 매칭으로 누적
     global_lock = TeamLock()
@@ -500,6 +797,13 @@ def read_kills_per_round(
 
     cap.release()
 
+    # 플레이 구간(직전 SB 종료 → 이번 SB 시작) 기록
+    prev_end = 0.0
+    for readout, window in zip(readouts, scoreboards):
+        readout.play_gap_sec = max(0.0, window.start_sec - prev_end)
+        prev_end = window.end_sec
+    median_gap = _median_play_gap(scoreboards)
+
     # ── 경고 집계 ──────────────────────────────────────────
     fail_streak = 0
     for readout in readouts:
@@ -515,7 +819,14 @@ def read_kills_per_round(
         timeline.warnings.append("team_lock_not_acquired")
 
     timeline.rounds = readouts
-    timeline.delta_kills, timeline.ace_rounds = compute_delta_kills(readouts, ace_threshold=ace_threshold)
+    (
+        timeline.delta_kills,
+        timeline.ace_rounds,
+        timeline.ace_candidates,
+        timeline.k_error_rounds,
+    ) = compute_delta_kills(
+        readouts, ace_threshold=ace_threshold, median_play_gap=median_gap
+    )
     return timeline
 
 
@@ -541,25 +852,30 @@ def write_kill_timeline_csv(timeline: VideoKillTimeline, out_path: Path) -> None
                 "round_index",
                 "start_sec",
                 "end_sec",
+                "start_mss",
                 "kills",
                 "delta_k",
                 "ace",
+                "k_read_error",
                 "nick_matched",
                 "match_score",
                 "row_index",
                 "rejoin_reset",
-                "inferred_by_team",  # ★ 안전장치 사용 여부 (1=재검증 필요)
+                "inferred_by_team",
             ]
         )
+        ace_set = set(timeline.ace_rounds)
         for readout, delta in zip(timeline.rounds, timeline.delta_kills):
             writer.writerow(
                 [
                     readout.round_index,
                     f"{readout.scoreboard_start_sec:.2f}",
                     f"{readout.scoreboard_end_sec:.2f}",
+                    sec_to_mss(readout.scoreboard_start_sec),
                     "" if readout.kills is None else readout.kills,
                     "" if delta is None else delta,
-                    1 if readout.round_index in timeline.ace_rounds else 0,
+                    1 if readout.round_index in ace_set else 0,
+                    1 if readout.k_read_error else 0,
                     readout.nick_matched,
                     f"{readout.match_score:.3f}",
                     "" if readout.row_index is None else readout.row_index,
@@ -569,29 +885,52 @@ def write_kill_timeline_csv(timeline: VideoKillTimeline, out_path: Path) -> None
             )
 
 
+def sec_to_mss(sec: float) -> str:
+    """초 → M:SS 표기 (예: 217.3 → '3:37')."""
+    total = int(sec)
+    return f"{total // 60}:{total % 60:02d}"
+
+
 def format_report(timeline: VideoKillTimeline) -> str:
     inferred_cnt = sum(1 for r in timeline.rounds if r.inferred_by_team)
+    ace_mss = [sec_to_mss(r.scoreboard_start_sec)
+               for r in timeline.rounds if r.round_index in timeline.ace_rounds]
+    cand_mss = [sec_to_mss(r.scoreboard_start_sec)
+                for r in timeline.rounds if r.round_index in timeline.ace_candidates]
     lines = [
         f"## {Path(timeline.video_path).name}",
-        f"player: {timeline.player_nick!r}  ace_rounds={timeline.ace_rounds}",
+        f"player: {timeline.player_nick!r}  ace_rounds={timeline.ace_rounds} ({ace_mss})",
+        f"candidates: {timeline.ace_candidates} ({cand_mss})",
         (
             f"rounds={len(timeline.rounds)}  warnings={timeline.warnings}  "
-            f"team_lock={timeline.team_lock_rounds}  inferred={inferred_cnt}"
+            f"team_lock={timeline.team_lock_rounds}  inferred={inferred_cnt}  "
+            f"k_errors={len(timeline.k_error_rounds)}"
         ),
         "timeline:",
     ]
+    ace_set = set(timeline.ace_rounds)
+    cand_set = set(timeline.ace_candidates)
+    err_set = set(timeline.k_error_rounds)
     for readout, delta in zip(timeline.rounds, timeline.delta_kills):
         delta_txt = "" if delta is None else str(delta)
-        ace = " ACE" if readout.round_index in timeline.ace_rounds else ""
+        ace = " ACE" if readout.round_index in ace_set else ""
+        cand = " CAND" if readout.round_index in cand_set else ""
+        kerr = " K_ERR" if readout.k_read_error else ""
         kills_txt = "?" if readout.kills is None else str(readout.kills)
-        # ★ 안전장치 사용 라운드는 [T] 표시 → 재검증 필요
+        deaths_txt = "" if readout.deaths is None else f"/{readout.deaths}"
         inferred_tag = " [T]" if readout.inferred_by_team else ""
+        reject = f" REJ:{readout.ace_reject_reason}" if readout.ace_reject_reason else ""
+        cand_reason = (
+            f" CAND:{readout.ace_candidate_reason}"
+            if readout.ace_candidate_reason
+            else ""
+        )
+        time_txt = sec_to_mss(readout.scoreboard_start_sec)
         lines.append(
-            f"  R{readout.round_index:02d} {readout.scoreboard_start_sec:7.1f}s "
-            f"K={kills_txt} ΔK={delta_txt}{ace}{inferred_tag} "
+            f"  R{readout.round_index:02d} {time_txt:>6} "
+            f"K={kills_txt}{deaths_txt} ΔK={delta_txt}{ace}{cand}{kerr}{inferred_tag}{reject}{cand_reason} "
             f"nick={readout.nick_matched!r} match={readout.match_score:.2f}"
         )
-        # 안전장치 후보 목록 (디버그)
         if readout.inferred_by_team and readout.team_candidates:
             for c in readout.team_candidates:
                 tag = "O" if c.get("k_ok") else "X"
@@ -607,6 +946,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="스코어보드 K 읽기 + ΔK 올킬 판별 (v1)")
     parser.add_argument("video_path", help="입력 mp4/mkv")
     parser.add_argument("--identity", default=None, help="player_identity.json (없으면 자동 확정)")
+    parser.add_argument(
+        "--player-nick",
+        default=None,
+        help="본인 닉 수동 지정 (특수문자·잘림 닉 — 자동 확정 실패 시)",
+    )
     parser.add_argument("--rounds-dir", default=None)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--nick-match-threshold", type=float, default=0.65)
@@ -624,7 +968,18 @@ def main() -> int:
     dataset_root = Path(args.dataset_root)
     rounds_dir = Path(args.rounds_dir) if args.rounds_dir else None
 
-    if args.identity:
+    sb_csv = find_scoreboard_csv(video_path, rounds_dir, dataset_root)
+    sb_count = len(load_scoreboard_windows(sb_csv)) if sb_csv else 0
+
+    if args.player_nick:
+        identity = PlayerIdentity(
+            nickname=args.player_nick.strip(),
+            confidence=1.0,
+            mode="manual",
+            sources={"accepted": True, "manual": True},
+        )
+        print(f"[k-reader] 닉 수동 지정 → {identity.nickname!r}", flush=True)
+    elif args.identity:
         identity = load_identity_json(Path(args.identity))
     else:
         print("[k-reader] identity JSON 없음 → player_identity 자동 실행", flush=True)
@@ -632,15 +987,18 @@ def main() -> int:
             video_path,
             rounds_dir=rounds_dir,
             dataset_root=dataset_root,
-            max_samples=40,
-            max_scoreboards=12,
+            max_samples=80,
+            max_scoreboards=min(40, max(sb_count, 12)),
         )
 
     if not identity.nickname:
         print(f"[k-reader] 닉 확정 실패 → SKIP ({identity.sources.get('reason', 'unknown')})")
+        print(
+            "[k-reader] 힌트: 특수문자·잘림 닉은 --player-nick '핵심4글자' 로 수동 지정",
+            flush=True,
+        )
         return 2
 
-    sb_csv = find_scoreboard_csv(video_path, rounds_dir, dataset_root)
     if not sb_csv:
         print("[k-reader] detected_scoreboards.csv 없음 → detect_rounds 먼저 실행")
         return 1

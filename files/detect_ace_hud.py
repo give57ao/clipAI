@@ -23,14 +23,29 @@ DEFAULT_DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 DEFAULT_OUTPUT_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 DEFAULT_JSON_DIR = Path(r"E:\clipai_result\hud_timeline")
 ACE_KILLS = 3
-_REQ_CONFIRM = 2           # K 전이 확정에 필요한 연속 동일 판독 — 3은 라운드 막판 킬 유실(실측)
-_REQ_REBASE = 5            # 하향/큰 점프(하프타임·리조인) 리베이스 확정 — 진짜 리셋은 경기당 1~2회
+# --- _KTracker v2: 증거창(evidence window) 확정 (2026-07-06 Sonnet, SONNET_TASK.md §3) ---
+# v1("연속 N회 동일판독")은 라운드 막판 HUD 깜빡임에 취약 — 중간값(예: 8)이 연속을
+# 못 채우면 확정이 뒤처지다 한 번에 큰 폭(예: 6→9, +3)으로 뭉쳐 가짜 올킬 생성.
+# v2는 "최근 _EV_WINDOW초 안에 증거가 몇 번 쌓였는지"로 확정하고, confirmed+1부터
+# 오름차순으로 하나씩 확정(체인)해 각 킬을 그 값이 처음 관측된 시각에 정확히 귀속.
+_EV_WINDOW = 4.0        # 증거 수집 창(초). 6초 이상 금지 — 이전 라운드 잔존증거가 새는 창이 됨
+_EV_CONFIRM_HI = 2      # conf>=_CONF_STRONG 판독 포함 시 확정에 필요한 창내 증거 수
+_EV_CONFIRM_LO = 3      # 전부 저신뢰면 요구 증거 수 (가드 G2: 흐릿한 프레임 연쇄 오독 방지)
+_CONF_STRONG = 0.75
+_EV_REBASE = 5          # 하향/+4↑ 리베이스 확정 증거 수 (가드 G1: 큰 점프 오독 방지)
+_ROLLBACK_WINDOW = 4.0  # 킬 확정 직후 되돌림 감시 창 (가드 G4)
+_EV_ROLLBACK = 3        # 되돌림에 필요한 이전값(from_k) 재관측 증거 수
 # ★ 라운드 경계 = 연속 row_miss (KDA HUD 사라짐 = 풀 스코어보드/전환 화면).
 #   도메인 정의 "라운드 = 풀 스코어보드 사이 구간"과 일치. 전멸 아이콘(analyze_hud_icons)보다
 #   훨씬 깨끗한 신호 — 캐시 스윕에서 recall 33%→79%, FP 대폭 감소 (2026-07-06 Opus).
 _BOUNDARY_ROWMISS = 18     # 경계 인정 최소 연속 row_miss 프레임(4fps≈4.5s). 실측: 18~20 안정,
                            #   <16이면 플레이 중 순간 가림에 과분할, ≥24면 스코어보드 놓쳐 병합
 _MAX_ACE_SPAN_SEC = 90.0   # 올킬 3킬은 한 라운드(≤90s) 내 (그 이상은 경계 놓친 병합 의심)
+# G5: 라운드 신뢰도 가드 — 라운드 전체가 거의 row_miss인데 그 틈에 잠깐 보인 값이
+# 이전 확정값보다 커서(예: 5→8 한 번의 점프) ace로 오판되는 사례 실측(23-00-50 R15:
+# 22초 라운드에 K 판독 성공 단 1건, 그마저 3만큼 뛴 값). 라운드 내 K 판독 성공 총
+# 횟수가 너무 적으면(경계 오검출로 잘려나온 가짜 라운드일 위험) ace 제외.
+_MIN_ROUND_K_SAMPLES = 10  # 임계값 스윕 실측: 6~8보다 FP를 더 줄이면서 recall 손실 없음
 
 # 클립 구간 — end-35 방식 대신 라운드 시작·첫 킬 기준
 _CLIP_PRE_ROUND_SEC = 6.0   # 라운드 시작 직전
@@ -48,7 +63,7 @@ class RoundTrack:
     kill_times: list[float] = field(default_factory=list)
     resets: int = 0
     reset_times: list[float] = field(default_factory=list)
-    k_samples: int = 0
+    k_samples: int = 0  # 라운드 구간 내 K 판독 성공(원시 프레임) 총 횟수 — 라운드 신뢰도(G5) 지표
     ace: bool = False
     end_reason: str = "hud_elim"
     first_kill_sec: float | None = None
@@ -91,50 +106,132 @@ class HudAceTimeline:
 
 
 class _KTracker:
-    """누적 K 확정값 상태머신 — 연속 동일 판독으로만 전이 확정.
+    """누적 K 확정값 상태머신 v2 — 증거창(evidence window) 확정.
 
-    - +1..+3 전이: _REQ_CONFIRM 회 연속 → 킬 이벤트 (증가량 = 킬 수)
-    - 하향 또는 +4 이상: _REQ_REBASE 회 연속 → 리셋(하프타임/리조인/오독) 리베이스
-    - None 판독은 pending 카운트를 깨지 않음 (판독 공백 허용)
+    값마다 "최근 _EV_WINDOW초 안에 몇 번, 어떤 신뢰도로 보였는가"를 누적하고,
+    confirmed+1부터 오름차순으로 하나씩 확정(체인)한다. 이렇게 하면 중간값(예: 8)이
+    띄엄띄엄(창 안이면 연속 아니어도 OK) 보이기만 해도 확정되어, v1처럼 확정이
+    뒤처지다 한 번에 큰 폭으로 뭉쳐 가짜 올킬을 만드는 문제가 구조적으로 사라진다.
+    킬은 그 값이 처음 관측된 시각(first_t)에 기록 — 실제 킬 타이밍과 라운드 귀속이 정확해짐.
+
+    가드 5종 (오독 FP 방어, G5는 _assign_events에 위치):
+      G1 리베이스(_EV_REBASE=5) — confirmed+3 초과·하향은 증거 5회 필요 (큰 점프 오독 방지)
+      G2 신뢰도 연동(_EV_CONFIRM_HI/LO) — 저신뢰뿐이면 3회 요구 (흐릿한 프레임 연쇄 오독 방지)
+      G3 트리플가드 — collect_reads에서 K/D/A 셋 다 파싱된 프레임만 채택 (배너/페이드 오염 방지)
+      G4 킬 롤백 — 킬 확정 직후 이전 값이 다시 쌓이고 확정값 증거가 안 늘면 되돌림
+          (순간 오독 2프레임이 킬로 확정된 경우의 안전핀)
+      G5 라운드 신뢰도(_assign_events, _MIN_ROUND_K_SAMPLES) — 판독 성공이 극히 드문
+          라운드(row_miss로 잘려나온 가짜 라운드일 위험)는 킬 합이 맞아도 ace 제외
     """
 
     def __init__(self) -> None:
         self.confirmed: int | None = None
-        self.pend_val: int | None = None
-        self.pend_n = 0
-        self.pend_t0 = 0.0
+        self.ev: dict[int, list[tuple[float, float]]] = {}  # k값 → [(t, conf), ...] (창 내)
         self.kills: list[KillEvent] = []
         self.resets: list[tuple[float, int, int]] = []
+        self.last_kill: tuple[float, int, int] | None = None  # (kill_t, from_k, to_k)
+
+    def _prune(self, t: float) -> None:
+        # 리셋(하프타임/리조인)은 도메인상 항상 K=0으로 감 — 그 값의 증거만 시간
+        # 만료 없이 누적. HUD 블랙아웃이 길어 "0" 판독이 수십 초에 걸쳐 드물게만
+        # 보일 수 있음(실측: 02-34-09 12:48~13:37, 48초간 "0" 판독 6회뿐).
+        # 값별로 독립 누적하므로 v1과 달리 중간에 다른 값(오독)이 끼어도 끊기지 않음.
+        #
+        # ⚠ 상향 킬 후보(confirmed<v<=confirmed+3)에도 같은 무제한 누적을 시도했으나
+        # (00-40-56 65:15/65:24, 9.25초 간격 "8" 사례 개선 목적) 여러 영상에서 오탐이
+        # FP 7→20으로 폭증해 순손실 확인·되돌림(2026-07-06). 스파스 중간값 문제는
+        # v==0(리셋)에서만 안전하게 해결됐고, 일반 킬체인 중간값 문제는 미해결로 남음
+        # — HUD_ACE_HANDOFF.md에 다음 과제로 기록.
+        cutoff = t - _EV_WINDOW
+        for key in list(self.ev.keys()):
+            if key == 0 and self.confirmed is not None and self.confirmed != 0:
+                continue
+            kept = [(tt, c) for tt, c in self.ev[key] if tt >= cutoff]
+            if kept:
+                self.ev[key] = kept
+            else:
+                del self.ev[key]
+
+    @staticmethod
+    def _strong(entries: list[tuple[float, float]]) -> bool:
+        if len(entries) >= _EV_CONFIRM_LO:
+            return True
+        return len(entries) >= _EV_CONFIRM_HI and max(c for _, c in entries) >= _CONF_STRONG
+
+    @staticmethod
+    def _first_t(entries: list[tuple[float, float]]) -> float:
+        return min(tt for tt, _ in entries)
+
+    def _confirm_to(self, k: int) -> None:
+        self.confirmed = k
+        self.ev = {v: e for v, e in self.ev.items() if v > k}
 
     def update(self, t: float, k: int | None, conf: float = 1.0) -> None:
-        # conf: 판독 IoU 신뢰도 — 현행 v1은 미사용, 증거창(v2) 확정 로직용 통로
         if k is None:
             return
-        if k == self.confirmed:
-            self.pend_val, self.pend_n = None, 0
-            return
-        if k == self.pend_val:
-            self.pend_n += 1
-        else:
-            self.pend_val, self.pend_n, self.pend_t0 = k, 1, t
+        self._prune(t)
+        self.ev.setdefault(k, []).append((t, conf))
 
         if self.confirmed is None:
-            if self.pend_n >= _REQ_CONFIRM:
-                self.confirmed = k
-                self.pend_val, self.pend_n = None, 0
+            if self._strong(self.ev.get(k, [])):
+                self._confirm_to(k)
             return
 
-        delta = k - self.confirmed
-        if 1 <= delta <= ACE_KILLS:
-            if self.pend_n >= _REQ_CONFIRM:
-                self.kills.append(KillEvent(self.pend_t0, self.confirmed, k))
-                self.confirmed = k
-                self.pend_val, self.pend_n = None, 0
-        else:
-            if self.pend_n >= _REQ_REBASE:
-                self.resets.append((self.pend_t0, self.confirmed, k))
-                self.confirmed = k
-                self.pend_val, self.pend_n = None, 0
+        if k == self.confirmed:
+            return
+
+        # G4: 킬 롤백 — 확정 직후(_ROLLBACK_WINDOW 내) 이전 값(from_k)이 다시 쌓이고,
+        # 확정값(to_k)의 증거가 그 뒤로 더 늘지 않았으면 순간 오독으로 보고 되돌림.
+        if (
+            self.last_kill is not None
+            and k == self.last_kill[1]
+            and (t - self.last_kill[0]) <= _ROLLBACK_WINDOW
+            and len(self.ev.get(k, [])) >= _EV_ROLLBACK
+            and len(self.ev.get(self.last_kill[2], [])) == 0
+        ):
+            lk = self.last_kill
+            if self.kills and self.kills[-1].from_k == lk[1] and self.kills[-1].to_k == lk[2]:
+                self.kills.pop()
+            self.confirmed = lk[1]
+            self.last_kill = None
+            self.ev = {}
+            return
+
+        # 상향 체인: confirmed+1부터 오름차순으로 확정 시도 (핵심).
+        # 9의 증거가 먼저 쌓여도 7·8 증거가 있으면 7→8→9 순서로 확정되어
+        # 각 킬이 제 시각·제 라운드로 흩어짐 (6→9 +3 뭉침 방지).
+        while True:
+            candidates = [
+                v for v, entries in self.ev.items()
+                if self.confirmed < v <= self.confirmed + ACE_KILLS and self._strong(entries)
+            ]
+            if not candidates:
+                break
+            nxt = min(candidates)
+            kill_t = self._first_t(self.ev[nxt])
+            self.kills.append(KillEvent(kill_t, self.confirmed, nxt))
+            self.last_kill = (kill_t, self.confirmed, nxt)
+            self._confirm_to(nxt)
+
+        # G1: 리베이스 (하향 또는 confirmed+3 초과) — 진짜 리셋/큰 점프는 증거 5회로 확정.
+        #
+        # ⚠ 0이 아닌 하향(v<confirmed, v!=0)을 리베이스 대상에서 제외해봤으나
+        # (03-02-03 10:22 "8→7" 오독 뭉침이 라운드를 쪼개는 사례 개선 목적) 트래커가
+        # 전역 순차 상태를 유지하는 구조라 이 시점 이후 confirmed 궤적 전체가 달라져
+        # 다른 3곳(00-44-50 9:00, 02-03-10 46:32, 00-42-33 36:40)의 TP를 깨뜨림
+        # (recall 51.9%→44.4%, 순손실) → 되돌림(2026-07-06). 국소 수정이 전역
+        # 리플렉트를 일으키는 구조적 한계 — 라운드별 독립 트래커로 재설계해야 안전할 수 있음.
+        reb_candidates = [
+            v for v, entries in self.ev.items()
+            if len(entries) >= _EV_REBASE and (v < self.confirmed or v > self.confirmed + ACE_KILLS)
+        ]
+        if reb_candidates:
+            v_reb = max(reb_candidates, key=lambda v: len(self.ev[v]))
+            reset_t = self._first_t(self.ev[v_reb])
+            self.resets.append((reset_t, self.confirmed, v_reb))
+            self.confirmed = v_reb
+            self.ev = {}
+            self.last_kill = None
 
 
 def _build_rounds(
@@ -162,10 +259,12 @@ def _build_rounds(
 def _assign_events(
     rounds: list[RoundTrack],
     tracker: _KTracker,
+    k_read_times: list[float],
 ) -> None:
     """킬/리셋 이벤트를 라운드(세그먼트)에 귀속하고 ace 판정.
 
-    ace = 세그먼트 내 킬 합 정확히 3 + 리셋 없음 + 3킬 스팬 ≤ _MAX_ACE_SPAN_SEC.
+    ace = 세그먼트 내 킬 합 정확히 3 + 리셋 없음 + 3킬 스팬 ≤ _MAX_ACE_SPAN_SEC
+    + 라운드 내 K 판독 성공 횟수 ≥ _MIN_ROUND_K_SAMPLES(G5).
     경계가 row_miss(스코어보드)라 세그먼트가 곧 도메인상 라운드와 일치.
     """
     if not rounds:
@@ -183,12 +282,19 @@ def _assign_events(
             continue
         r = rounds[idx]
         r.kills += ev.to_k - ev.from_k
-        r.k_samples += 1
         r.kill_times.append(ev.t)
         if r.first_kill_sec is None or ev.t < r.first_kill_sec:
             r.first_kill_sec = ev.t
         if r.ace_sec is None and r.kills >= ACE_KILLS:
             r.ace_sec = ev.t
+
+    # G5: 라운드 신뢰도 — 판독 성공(원시 프레임) 총 횟수. kill_times(확정 전이 수)와
+    # 별개로, 라운드가 거의 전부 row_miss인데 그 틈의 값이 우연히 +3 떨어져 있어
+    # ace로 오판되는 사례 방지(23-00-50 R15: 22s 라운드에 판독 성공 단 1회).
+    for t in k_read_times:
+        idx = round_for(t)
+        if idx is not None:
+            rounds[idx].k_samples += 1
 
     # 리셋은 세그먼트 경계(_build_rounds에서 분리) — 경계에 걸친 리셋을 내부로
     # 오귀속하면 그 세그먼트의 정상 올킬을 잘못 기각(02-21-23 64:44 실측).
@@ -210,6 +316,7 @@ def _assign_events(
             r.kills == ACE_KILLS
             and r.resets == 0
             and span <= _MAX_ACE_SPAN_SEC
+            and r.k_samples >= _MIN_ROUND_K_SAMPLES
         )
 
 
@@ -308,6 +415,7 @@ def timeline_from_reads(
     )
     tracker = _KTracker()
     boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
+    k_read_times: list[float] = []  # K 판독 성공 시각 (라운드 신뢰도 G5 집계용)
     rowmiss_run = 0
     run_start = 0.0
     run_last = 0.0
@@ -315,6 +423,7 @@ def timeline_from_reads(
     for r in reads:
         if r.k is not None:
             timeline.k_template_hits += 1
+            k_read_times.append(r.t)
         elif r.method in ("template_miss", "triple_incomplete"):
             timeline.k_template_miss += 1
         elif r.method == "row_miss":
@@ -336,7 +445,7 @@ def timeline_from_reads(
 
     rounds = _build_rounds(boundaries, tracker, duration)
     timeline.hud_end_count = len(boundaries)
-    _assign_events(rounds, tracker)
+    _assign_events(rounds, tracker, k_read_times)
     timeline.rounds = rounds
     timeline.ace_rounds = [r.round_index for r in rounds if r.ace]
     timeline.kill_events = tracker.kills

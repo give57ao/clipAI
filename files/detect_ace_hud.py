@@ -63,6 +63,18 @@ class KillEvent:
 
 
 @dataclass
+class KRead:
+    """프레임 1개의 원시 K 판독 — 신호 캐시의 단위 (hud_sig_cache.py).
+
+    method: 'template'(성공) | 'template_miss' | 'row_miss' | 'triple_incomplete'
+    """
+    t: float
+    k: int | None
+    conf: float
+    method: str
+
+
+@dataclass
 class HudAceTimeline:
     video_path: str
     scan_fps: float
@@ -94,7 +106,8 @@ class _KTracker:
         self.kills: list[KillEvent] = []
         self.resets: list[tuple[float, int, int]] = []
 
-    def update(self, t: float, k: int | None) -> None:
+    def update(self, t: float, k: int | None, conf: float = 1.0) -> None:
+        # conf: 판독 IoU 신뢰도 — 현행 v1은 미사용, 증거창(v2) 확정 로직용 통로
         if k is None:
             return
         if k == self.confirmed:
@@ -207,31 +220,44 @@ def scan_hud_aces(
     ace_kills: int = ACE_KILLS,
     dataset_root: Path | None = None,
 ) -> HudAceTimeline:
-    video_path = Path(video_path)
-    timeline = HudAceTimeline(
-        video_path=str(video_path),
+    reads, duration, err = collect_reads(
+        Path(video_path), scan_fps=scan_fps, dataset_root=dataset_root
+    )
+    timeline = timeline_from_reads(
+        reads,
+        duration=duration,
+        video_path=Path(video_path),
         scan_fps=scan_fps,
         ace_kills=ace_kills,
     )
-    get_hud_digit_matcher()
+    if err:
+        timeline.warnings.append(err)
+    return timeline
 
+
+def collect_reads(
+    video_path: Path,
+    *,
+    scan_fps: float = 4.0,
+    dataset_root: Path | None = None,
+) -> tuple[list[KRead], float, str | None]:
+    """영상 1패스 디코드 → 프레임별 원시 K 판독 리스트.
+
+    이 결과(신호 캐시)만 있으면 판정 로직은 영상 재판독 없이 무한 재실험 가능
+    — hud_sig_cache.py 로 저장, hud_from_cache.py / timeline_from_reads 로 소비.
+    """
+    get_hud_digit_matcher()
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        timeline.warnings.append("video_open_failed")
-        return timeline
+        return [], 0.0, "video_open_failed"
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = frame_total / fps if frame_total > 0 else 0.0
     step = max(1, int(round(fps / scan_fps))) if scan_fps > 0 else int(fps)
 
-    tracker = _KTracker()
-    boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
-    rowmiss_run = 0
-    run_start = 0.0
-    run_last = 0.0
+    reads: list[KRead] = []
     frame_idx = 0
-
     while True:
         if frame_idx % step == 0:
             ok, frame = cap.read()
@@ -241,28 +267,11 @@ def scan_hud_aces(
             game, _ = extract_game_crop_bgr(frame, dataset_root=dataset_root)
             # 오독 방어: K/D/A 세 슬롯 모두 파싱된 프레임만 채택 —
             # 행이 배너·페이드로 오염되면 보통 셋 다 깨짐
-            k, d, a, _, method = read_kda_triple_from_game(game)
+            k, d, a, conf, method = read_kda_triple_from_game(game)
             if k is not None and (d is None or a is None):
                 k = None
                 method = "triple_incomplete"
-            if k is not None:
-                timeline.k_template_hits += 1
-            elif method in ("template_miss", "triple_incomplete"):
-                timeline.k_template_miss += 1
-            elif method == "row_miss":
-                timeline.k_row_miss += 1
-            tracker.update(t, k)
-
-            # 경계 검출: KDA 행이 사라진(row_miss) 연속 구간 = 스코어보드/전환
-            if method == "row_miss":
-                if rowmiss_run == 0:
-                    run_start = t
-                rowmiss_run += 1
-                run_last = t
-            else:
-                if rowmiss_run >= _BOUNDARY_ROWMISS:
-                    boundaries.append((run_start + run_last) / 2)
-                rowmiss_run = 0
+            reads.append(KRead(t=t, k=k, conf=float(conf), method=method))
         else:
             if not cap.grab():
                 break
@@ -276,6 +285,52 @@ def scan_hud_aces(
             break
 
     cap.release()
+    return reads, duration, None
+
+
+def timeline_from_reads(
+    reads: list[KRead],
+    *,
+    duration: float,
+    video_path: Path,
+    scan_fps: float = 4.0,
+    ace_kills: int = ACE_KILLS,
+) -> HudAceTimeline:
+    """원시 판독 리스트 → 라운드 분할·킬 이벤트·ace 판정 (영상 접근 없음).
+
+    판정 로직의 단일 진입점: 실스캔(scan_hud_aces)과 캐시 재계산(hud_from_cache)이
+    모두 이 함수를 쓰므로 로직 수정 시 두 경로가 자동 일치.
+    """
+    timeline = HudAceTimeline(
+        video_path=str(video_path),
+        scan_fps=scan_fps,
+        ace_kills=ace_kills,
+    )
+    tracker = _KTracker()
+    boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
+    rowmiss_run = 0
+    run_start = 0.0
+    run_last = 0.0
+
+    for r in reads:
+        if r.k is not None:
+            timeline.k_template_hits += 1
+        elif r.method in ("template_miss", "triple_incomplete"):
+            timeline.k_template_miss += 1
+        elif r.method == "row_miss":
+            timeline.k_row_miss += 1
+        tracker.update(r.t, r.k, r.conf)
+
+        # 경계 검출: KDA 행이 사라진(row_miss) 연속 구간 = 스코어보드/전환
+        if r.method == "row_miss":
+            if rowmiss_run == 0:
+                run_start = r.t
+            rowmiss_run += 1
+            run_last = r.t
+        else:
+            if rowmiss_run >= _BOUNDARY_ROWMISS:
+                boundaries.append((run_start + run_last) / 2)
+            rowmiss_run = 0
     if rowmiss_run >= _BOUNDARY_ROWMISS:
         boundaries.append((run_start + run_last) / 2)
 

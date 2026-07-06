@@ -18,20 +18,19 @@ import cv2
 from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher
 from hud_kda import read_kda_triple_from_game
-from hud_round_end import HudState, analyze_hud_icons
 
 DEFAULT_DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 DEFAULT_OUTPUT_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 DEFAULT_JSON_DIR = Path(r"E:\clipai_result\hud_timeline")
 ACE_KILLS = 3
-_MIN_ROUND_SEC = 20.0
-_MIN_ROUND_SAMPLES = 4     # 라운드 내 최소 K 판독 수 (판독 공백 라운드 배제)
 _REQ_CONFIRM = 2           # K 전이 확정에 필요한 연속 동일 판독 — 3은 라운드 막판 킬 유실(실측)
 _REQ_REBASE = 5            # 하향/큰 점프(하프타임·리조인) 리베이스 확정 — 진짜 리셋은 경기당 1~2회
-_KILL_GRACE_SEC = 2.5      # 라운드 경계 직후 이 시간 내 킬 이벤트는 직전 라운드 귀속
-# 라운드 경계(전멸 아이콘) 스트릭 — 오검출 경계가 올킬을 쪼개는 주범 (영상7 14:30 실측)
-_MIN_ACTIVE_STREAK = 3     # 경계 인정 전 필요한 연속 active 프레임
-_MIN_ENDED_STREAK = 3      # 연속 전멸 프레임 (4fps 기준 0.75s — 상향 시 실경계 유실 주의)
+# ★ 라운드 경계 = 연속 row_miss (KDA HUD 사라짐 = 풀 스코어보드/전환 화면).
+#   도메인 정의 "라운드 = 풀 스코어보드 사이 구간"과 일치. 전멸 아이콘(analyze_hud_icons)보다
+#   훨씬 깨끗한 신호 — 캐시 스윕에서 recall 33%→79%, FP 대폭 감소 (2026-07-06 Opus).
+_BOUNDARY_ROWMISS = 18     # 경계 인정 최소 연속 row_miss 프레임(4fps≈4.5s). 실측: 18~20 안정,
+                           #   <16이면 플레이 중 순간 가림에 과분할, ≥24면 스코어보드 놓쳐 병합
+_MAX_ACE_SPAN_SEC = 90.0   # 올킬 3킬은 한 라운드(≤90s) 내 (그 이상은 경계 놓친 병합 의심)
 
 # 클립 구간 — end-35 방식 대신 라운드 시작·첫 킬 기준
 _CLIP_PRE_ROUND_SEC = 6.0   # 라운드 시작 직전
@@ -125,32 +124,36 @@ class _KTracker:
                 self.pend_val, self.pend_n = None, 0
 
 
-def _merge_short_rounds(rounds: list[RoundTrack], min_sec: float = 15.0) -> list[RoundTrack]:
-    """짧은 라운드는 직전 라운드에 경계만 흡수 (킬 귀속은 이후 일괄)."""
-    if not rounds:
-        return rounds
-    merged: list[RoundTrack] = []
-    for r in rounds:
-        dur = r.end_sec - r.start_sec
-        if merged and dur < min_sec:
-            prev = merged[-1]
-            prev.end_sec = r.end_sec
-            prev.k_samples += r.k_samples
-        else:
-            merged.append(r)
-    for i, r in enumerate(merged):
-        r.round_index = i
-    return merged
+def _build_rounds(
+    boundaries: list[float],
+    tracker: _KTracker,
+    duration: float,
+) -> list[RoundTrack]:
+    """경계(연속 row_miss 중앙) + 리셋 시각으로 라운드 세그먼트 생성.
+
+    리셋(하프타임·리조인)도 라운드 경계 — 서로 다른 매치/반의 킬이 섞이지 않도록.
+    """
+    reset_ts = [t for (t, _o, _n) in tracker.resets]
+    seps = sorted(set(boundaries) | set(reset_ts))
+    rounds: list[RoundTrack] = []
+    prev = 0.0
+    idx = 0
+    for sp in seps + [duration]:
+        if sp - prev > 0.5:
+            rounds.append(RoundTrack(round_index=idx, start_sec=prev, end_sec=sp))
+            idx += 1
+        prev = sp
+    return rounds
 
 
 def _assign_events(
     rounds: list[RoundTrack],
     tracker: _KTracker,
 ) -> None:
-    """킬/리셋 이벤트를 라운드에 귀속하고 ace 판정.
+    """킬/리셋 이벤트를 라운드(세그먼트)에 귀속하고 ace 판정.
 
-    라운드 시작 직후 _KILL_GRACE_SEC 내 이벤트는 확정 지연·경계 오차로 보고
-    직전 라운드에 귀속 (라운드 초반 프리즈 시간에는 킬 불가).
+    ace = 세그먼트 내 킬 합 정확히 3 + 리셋 없음 + 3킬 스팬 ≤ _MAX_ACE_SPAN_SEC.
+    경계가 row_miss(스코어보드)라 세그먼트가 곧 도메인상 라운드와 일치.
     """
     if not rounds:
         return
@@ -158,8 +161,6 @@ def _assign_events(
     def round_for(t: float) -> int | None:
         for i, r in enumerate(rounds):
             if r.start_sec <= t < r.end_sec:
-                if i > 0 and t < r.start_sec + _KILL_GRACE_SEC:
-                    return i - 1
                 return i
         return len(rounds) - 1 if t >= rounds[-1].end_sec else None
 
@@ -169,33 +170,33 @@ def _assign_events(
             continue
         r = rounds[idx]
         r.kills += ev.to_k - ev.from_k
+        r.k_samples += 1
         r.kill_times.append(ev.t)
         if r.first_kill_sec is None or ev.t < r.first_kill_sec:
             r.first_kill_sec = ev.t
         if r.ace_sec is None and r.kills >= ACE_KILLS:
             r.ace_sec = ev.t
 
+    # 리셋은 세그먼트 경계(_build_rounds에서 분리) — 경계에 걸친 리셋을 내부로
+    # 오귀속하면 그 세그먼트의 정상 올킬을 잘못 기각(02-21-23 64:44 실측).
+    # 엄격 내부(start < t < end)만 카운트: 정상적으론 발생 안 하는 방어용.
     for (t, _old, _new) in tracker.resets:
-        idx = round_for(t)
-        if idx is not None:
-            rounds[idx].resets += 1
-            rounds[idx].reset_times.append(t)
+        for r in rounds:
+            if r.start_sec < t < r.end_sec:
+                r.resets += 1
+                r.reset_times.append(t)
+                break
 
     for r in rounds:
-        dur = r.end_sec - r.start_sec
-        # 리셋은 "3번째 킬 이전"에 있을 때만 실격 — 킬 이전/사이 리셋은
-        # 가짜 베이스라인→가짜 킬을 만들 수 있지만, 올킬 후 라운드 전환
-        # 구간의 리베이스 노이즈는 판정과 무관 (R20 실측)
-        reset_before_ace = (
-            any(rt <= r.ace_sec + 1.0 for rt in r.reset_times)
-            if r.ace_sec is not None
-            else r.resets > 0
+        span = (
+            (r.ace_sec - r.first_kill_sec)
+            if (r.ace_sec is not None and r.first_kill_sec is not None)
+            else 0.0
         )
         r.ace = (
             r.kills == ACE_KILLS
-            and not reset_before_ace
-            and dur >= _MIN_ROUND_SEC
-            and r.k_samples >= _MIN_ROUND_SAMPLES
+            and r.resets == 0
+            and span <= _MAX_ACE_SPAN_SEC
         )
 
 
@@ -224,15 +225,11 @@ def scan_hud_aces(
     duration = frame_total / fps if frame_total > 0 else 0.0
     step = max(1, int(round(fps / scan_fps))) if scan_fps > 0 else int(fps)
 
-    rounds: list[RoundTrack] = []
-    cur = RoundTrack(round_index=0, start_sec=0.0)
     tracker = _KTracker()
-
-    active_streak = 0
-    ended_streak = 0
-    ended_state: HudState | None = None
-    ended_start = 0.0
-    awaiting_next = False
+    boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
+    rowmiss_run = 0
+    run_start = 0.0
+    run_last = 0.0
     frame_idx = 0
 
     while True:
@@ -243,45 +240,29 @@ def scan_hud_aces(
             t = frame_idx / fps
             game, _ = extract_game_crop_bgr(frame, dataset_root=dataset_root)
             # 오독 방어: K/D/A 세 슬롯 모두 파싱된 프레임만 채택 —
-            # 행이 배너·페이드로 오염되면 보통 셋 다 깨짐 (resets 83→ 억제)
+            # 행이 배너·페이드로 오염되면 보통 셋 다 깨짐
             k, d, a, _, method = read_kda_triple_from_game(game)
             if k is not None and (d is None or a is None):
                 k = None
                 method = "triple_incomplete"
             if k is not None:
                 timeline.k_template_hits += 1
-                cur.k_samples += 1
             elif method in ("template_miss", "triple_incomplete"):
                 timeline.k_template_miss += 1
             elif method == "row_miss":
                 timeline.k_row_miss += 1
             tracker.update(t, k)
 
-            state = analyze_hud_icons(frame).state
-            if state == HudState.ACTIVE:
-                active_streak += 1
-                ended_streak = 0
-                ended_state = None
-                awaiting_next = False
-            elif state in (HudState.RED_ELIMINATED, HudState.BLUE_ELIMINATED):
-                if ended_state != state:
-                    ended_streak = 1
-                    ended_state = state
-                    ended_start = t
-                else:
-                    ended_streak += 1
-                if (
-                    not awaiting_next
-                    and active_streak >= _MIN_ACTIVE_STREAK
-                    and ended_streak >= _MIN_ENDED_STREAK
-                ):
-                    cur.end_sec = ended_start
-                    cur.end_reason = state.value
-                    rounds.append(cur)
-                    timeline.hud_end_count += 1
-                    cur = RoundTrack(round_index=len(rounds), start_sec=ended_start)
-                    awaiting_next = True
-                    active_streak = 0
+            # 경계 검출: KDA 행이 사라진(row_miss) 연속 구간 = 스코어보드/전환
+            if method == "row_miss":
+                if rowmiss_run == 0:
+                    run_start = t
+                rowmiss_run += 1
+                run_last = t
+            else:
+                if rowmiss_run >= _BOUNDARY_ROWMISS:
+                    boundaries.append((run_start + run_last) / 2)
+                rowmiss_run = 0
         else:
             if not cap.grab():
                 break
@@ -295,14 +276,11 @@ def scan_hud_aces(
             break
 
     cap.release()
+    if rowmiss_run >= _BOUNDARY_ROWMISS:
+        boundaries.append((run_start + run_last) / 2)
 
-    if cur.k_samples > 0 or cur.start_sec < duration:
-        cur.end_sec = duration
-        cur.end_reason = "eof"
-        if not rounds or rounds[-1].round_index != cur.round_index:
-            rounds.append(cur)
-
-    rounds = _merge_short_rounds(rounds)
+    rounds = _build_rounds(boundaries, tracker, duration)
+    timeline.hud_end_count = len(boundaries)
     _assign_events(rounds, tracker)
     timeline.rounds = rounds
     timeline.ace_rounds = [r.round_index for r in rounds if r.ace]

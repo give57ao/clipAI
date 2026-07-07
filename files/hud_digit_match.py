@@ -17,6 +17,55 @@ _K_MATCH_MIN = 0.50
 _K_IOU_MIN = 0.55
 _K_IOU_MARGIN = 0.06   # 1등-2등 IoU 차이가 이보다 작으면 모호 → None (안전 미스)
 
+# --- R4 (2026-07-07): 숫자 CNN 판독 — IoU는 8을 0/6/9와 구분 못 해 EXCLUDE_DIGITS로
+# 뺐던 근본 한계를 학습 분류기로 해소(train_hud_digit_cnn.py, held-out val_acc 99.7%,
+# 실프레임 스팟체크로 8 고신뢰 판독 확인). IoU는 CNN 모델이 없을 때만 폴백.
+_CNN_MODEL_PATH = Path(r"E:\Highlights\ml_dataset\models\hud_digit_clf_best.pt")
+_CNN_MIN_P = 0.85
+_cnn_model = None
+_cnn_classes: list = []
+_cnn_device = None
+
+
+def _get_cnn():
+    global _cnn_model, _cnn_classes, _cnn_device
+    if _cnn_model is not None or not _CNN_MODEL_PATH.exists():
+        return _cnn_model
+    import json as _json
+
+    import torch as _torch
+
+    from train_hud_digit_cnn import TinyDigitCNN
+
+    meta_path = _CNN_MODEL_PATH.parent / "hud_digit_clf_meta.json"
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    _cnn_classes = [int(c) if c != "junk" else "junk" for c in meta["classes"]]
+    _cnn_device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+    model = TinyDigitCNN(num_classes=len(_cnn_classes)).to(_cnn_device)
+    model.load_state_dict(_torch.load(_CNN_MODEL_PATH, map_location=_cnn_device))
+    model.eval()
+    _cnn_model = model
+    return _cnn_model
+
+
+def match_glyph_cnn(glyph: np.ndarray | None) -> tuple[int | None, float]:
+    """CNN 분류 — junk 또는 최고확률 < `_CNN_MIN_P`면 None(판독실패, 안전 미스)."""
+    import torch as _torch
+
+    model = _get_cnn()
+    if model is None or glyph is None:
+        return None, 0.0
+    x = glyph.astype(np.float32) / 255.0
+    t = _torch.from_numpy(x).unsqueeze(0).unsqueeze(0).to(_cnn_device)
+    with _torch.no_grad():
+        p = _torch.softmax(model(t), dim=1)[0]
+    top_i = int(_torch.argmax(p).item())
+    top_p = float(p[top_i].item())
+    label = _cnn_classes[top_i]
+    if label == "junk" or top_p < _CNN_MIN_P:
+        return None, top_p
+    return label, top_p
+
 
 def red_mask(crop_bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)

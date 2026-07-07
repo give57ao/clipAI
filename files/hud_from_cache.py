@@ -43,6 +43,14 @@ def load_reads(cache_path: Path) -> tuple[list[KRead], float, float, str]:
     return reads, data["duration"], data.get("scan_fps", 4.0), data["stem"]
 
 
+def load_boundary_verdicts(stem: str, cache_dir: Path) -> list[list] | None:
+    """R2 Task 1(hud_boundary_verify.py) 산출물. 없으면 None(검증 없이 전체 유지)."""
+    p = cache_dir / f"{stem}.boundary.json"
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8")).get("runs", [])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="신호 캐시 → 판정 재계산")
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
@@ -67,12 +75,16 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for cp in sorted(cache_dir.glob("*.json")):
+        if cp.name.endswith(".boundary.json"):
+            continue
         reads, duration, scan_fps, stem = load_reads(cp)
+        boundary_verdicts = load_boundary_verdicts(stem, cache_dir)
         tl = timeline_from_reads(
             reads,
             duration=duration,
             video_path=Path(rf"E:\OBS\{stem}.mp4"),
             scan_fps=scan_fps,
+            boundary_verdicts=boundary_verdicts,
         )
         (out_dir / f"{stem}.json").write_text(
             json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8"

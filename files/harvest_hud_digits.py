@@ -40,6 +40,14 @@ from hud_kda import locate_kda_glyphs
 
 DEFAULT_OUT = Path(r"E:\clipai_result\hud_templates_harvest")
 
+# 2026-07-07 실측: "8" 템플릿은 IoU 마진 규칙(match_glyph_iou) 하에서 0/6/9와 자주
+# 혼동돼, 8을 "잡으려다" 오히려 0/6/9의 정상 판독까지 애매(마진 미달)로 기각시킴.
+# A/B 비교(같은 프레임, 8 있/없): 판독 hit률 +8.8%~+31.4%, recall 51.9%→74.1%,
+# precision 66.7%→76.9% (라벨 10영상 GT 27건). "8을 아예 안 읽는" 쪽이 8을 어설프게
+# 읽으려다 다른 숫자를 놓치는 것보다 압도적으로 이득 — 재설치 금지.
+# (킬체인은 7→9를 +2로 정확히 계수하므로 8 미판독이 킬 수 자체를 틀리게 하지 않음)
+EXCLUDE_DIGITS = {8}
+
 # 라벨 10영상 (HUD_ACE_HANDOFF.md §3) + 캘리브 영상
 DEFAULT_VIDEOS = [
     r"E:\OBS\2026-03-19 23-00-50.mp4",
@@ -205,6 +213,9 @@ def install(out: Path) -> None:
     for cid, lab in labels.items():
         if not isinstance(lab, int) or not (0 <= lab <= 9):
             continue
+        if lab in EXCLUDE_DIGITS:
+            print(f"[install] {cid}: 숫자 {lab}는 EXCLUDE_DIGITS라 건너뜀 (사유는 상단 주석)")
+            continue
         by_digit.setdefault(lab, []).append((cid, meta.get(cid, {}).get("size", 0)))
 
     tdir = DEFAULT_TEMPLATE_DIR
@@ -221,9 +232,11 @@ def install(out: Path) -> None:
             suffix = "" if i == 0 else f"_{'bc'[i - 1]}"
             shutil.copy2(cdir / f"{cid}_medoid.png", tdir / f"k_{digit}{suffix}.png")
             print(f"[install] k_{digit}{suffix}.png <- {cid} (n={size})")
-    missing = [d for d in range(10) if d not in by_digit]
+    missing = [d for d in range(10) if d not in by_digit and d not in EXCLUDE_DIGITS]
     if missing:
         print(f"[install] ⚠ 미확보 숫자: {missing} — 해당 K값 판독 불가")
+    if EXCLUDE_DIGITS:
+        print(f"[install] (의도적 제외: {sorted(EXCLUDE_DIGITS)} — 상단 EXCLUDE_DIGITS 주석 참고)")
     from hud_digit_match import reset_matcher
     reset_matcher()
 

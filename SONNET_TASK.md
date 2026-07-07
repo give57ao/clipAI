@@ -2,7 +2,11 @@
 
 > 작성: 2026-07-06 Fable. 배경·용어는 `HUD_ACE_HANDOFF.md` §0 필독.
 > 원 목표: recall ≥ 85% AND precision ≥ 80% — 정답 타임라인 밖 올킬은 전부 오답.
-> **▶▶ 최신 작업은 맨 아래 "R2 (2026-07-07): 미탐 7건 소탕 명세" — 거기부터 시작.**
+> **▶▶ R3 완료 (2026-07-07 Sonnet)**: recall 88.5%(23/26, 유지·목표달성) /
+> precision 65.7%(23/35, 퇴보·목표미달). 상세는 `HUD_ACE_HANDOFF.md` §0 맨 아래
+> "R3 통합 결과" 절 — precision 폭0 FP 문제는 실측으로 로컬 임계값 분리 불가 확인,
+> 다음 세션은 그 절 "다음 세션 우선순위"(cross-round 팬텀 브리징 / HMM 카드)부터.
+> 베이스라인 `r3_final` 저장 완료. 아래 "R2"/원 설계 명세는 과거 기록(참고용).
 >
 > **★★ R2 완료 (2026-07-07 Sonnet)**: `SONNET_TASK.md` R2 Task 0~5 실행 완료.
 > GT **26건** 기준 **recall 88.5% (23/26) ✓**, **precision 74.2% (23/31) ✗**.
@@ -294,3 +298,95 @@ python -u hud_from_cache.py && python -u _compare_hud_gt.py   # 3초 루프
   제거할 것으로 기대(현 FP 6건 중 단발성 +3 점프형 확인 필요).
 - 완료 시: 실스캔 1회 일치 확인(짧은 영상) → 핸드오프 갱신 → 커밋. 배치 37~113
   재개는 사용자 승인 후.
+
+---
+
+# R3 (2026-07-07): 라운드별 독립 정산 디코더로 판정 전면 교체 (Fable 설계·핵심 구현 완료)
+
+> 배경: R2 완료 시점 recall 88.5% (23/26), precision 74.2% (23/31).
+> 사용자가 미탐 3건을 영상으로 재확인해 준 결과 + 캐시 덤프 대조로 **세 건 모두
+> "판독(캐시)에는 정답이 이미 있는데 전역 상태머신이 버리는" 사례**로 확정.
+> 핵심 디코더는 Fable이 구현·자가검증 완료(`files/hud_round_settle.py`, selftest 6/6).
+> **이 R3의 작업 = 그 모듈을 `detect_ace_hud.py`에 통합하고 3종 세트로 측정·튜닝.**
+
+## 사용자 육안 확인 (2026-07-07, 절대 신뢰) + 캐시 대조 결과
+
+| GT | 사용자 확인 | 캐시 원시 판독 (덤프 확인 완료) | 미탐 진짜 원인 |
+|---|---|---|---|
+| 00-40-56 41:54–42:39 | 42:35–42:37에 K/D/A **9/4/0** 노출 | `9` 6회 판독(conf ≤0.97) 멀쩡히 존재. 그런데 42:24.75·42:32.75~33.75에 **스퓨리어스 `0` 5회(conf 0.91~0.95!)** | v==0 무기한 누적 예외가 산발 0 오독 5회를 모아 `_EV_REBASE=5` 충족 → **가짜 리셋 6→0, 0→9 연쇄** → 킬 전멸 |
+| 02-21-23 54:20–54:41 | 54:37–54:40에 K/D/A **11/8/0** 노출 | `9`×3, `10`×3, `11`×1(conf 0.90) 존재. 54:28.75에 또 스퓨리어스 `0`(0.92) | 52:32 `7→0` 오독 리베이스로 confirmed 오염(전역 이월) → 9/10/11이 rebase 문턱(5회)을 못 넘어 증발 |
+| 03-02-03 14:15–14:57 | 14:53–14:56에 K/D/A **3/0/0** 노출 | 직전 세그먼트 `0` 안정 판독 → 긴 row_miss(14:12.5~14:41) → `1`×다수, `2`×3, `3`×6 | 0→1 킬이 경계에 걸쳐 라운드 귀속 실패(킬 1+2 분산). **k_base=0 이월 + 라운드 내 1→2→3이면 ΔK=3 정확** |
+
+공통 패턴 2가지 (이번에 처음 정량 확인):
+1. **스퓨리어스 고신뢰 `0` 오독**이 여러 영상에서 반복 실측(conf 0.9+ — 킬 연출 중 슬래시
+   분리가 밀려 A슬롯 0을 K로 읽는 것으로 추정). v==0 무기한 누적 예외와 결합하면 치명적.
+2. 라운드 끝값은 사용자 도메인 확정("마지막 킬 후 ≥2초 노출")대로 **거의 항상 안정 판독됨**
+   → 라운드 단위 정산(끝값-시작값)이 킬 체인 추적보다 근본적으로 강건.
+
+## 설계 요지 (`files/hud_round_settle.py` — 구현·selftest 완료, 수정 금지 영역 아님이지만 로직 변경 전 Fable 근거 주석 필독)
+
+- `settle_rounds(reads, boundaries, duration) -> list[SettledRound]` — 순수 함수.
+  세그먼트(경계 사이)마다 독립으로:
+  1. **지지 필터**: 세그먼트 내 관측 <2회이고 conf<0.88인 값 제거 (42:00 `7` 0.73 단발 등)
+  2. **DP 최적 체인**: 비감소(상승폭≤3) 경로 중 conf 합 최대. **0-리셋 간선은 페널티(2.0)**
+     → 산발 0 오독은 뒤따르는 정상 체인에 점수로 지고, 진짜 하프타임(이후 저값 지속)은 이김
+  3. **k_base 이월**: 직전 세그먼트 k_end를 기준으로 `kills = k_end - k_base`.
+     경계 직후(≤10s) 첫 관측이 곧 +1/+2면 직전 라운드 귀속(그레이스, R2 Task 2 의미 동일)
+- 전역 순차 상태가 없으므로 "국소 수정 → 원거리 회귀"(핸드오프 '구조적 시사점') 구조적 소멸.
+- ace 판정(kills==3·reset 제외·span·G5)은 기존대로 `detect_ace_hud.py` 소관.
+
+## Task 1 — `timeline_from_reads` 통합 (판정 경로 교체)
+
+`detect_ace_hud.py`에서:
+1. `_KTracker` 경로(`tracker.update` 루프, `_postprocess_kills`, `_kill_round_index`,
+   `_assign_events`의 킬 귀속부)를 `hud_round_settle.settle_rounds` 호출로 교체.
+   - reads → `[(r.t, r.k, r.conf)]` 매핑, boundaries는 기존 CNN 검증(boundary_verdicts)
+     반영 후의 것을 그대로 전달. **경계 계산·CNN 검증 로직은 변경 금지.**
+   - `SettledRound` → `RoundTrack` 매핑: kills/kill_times/k_samples 그대로,
+     `reset=True`→`resets=1`, first_kill_sec=min(kill_times), ace_sec=3번째 kill_time.
+   - ace 판정식(G5 `_MIN_ROUND_K_SAMPLES`·`_MAX_ACE_SPAN_SEC`·`kills==3`·resets==0)은
+     기존 `_assign_events` 말미 형태 유지.
+   - JSON `kill_events`: 라운드별 k_base에서 누적 재구성
+     (`KillEvent(t=kill_times[i], from_k=k_base+i, to_k=k_base+i+1)`) — 스키마 유지.
+2. 구 코드는 삭제하지 말고 일단 남겨둠 (`_KTracker` 등) — diff 검증 끝나고 Task 4에서 정리.
+3. 합성 스모크: `python -u hud_round_settle.py` (6/6) + `hud_from_cache.py` 1영상 실행 확인.
+
+## Task 2 — 3종 세트 측정 + TP diff 정밀 대조
+
+```powershell
+python -u hud_from_cache.py && python -u _compare_hud_gt.py && python -u _tp_diff.py --compare-to r2_final
+```
+
+- **기대: +2 획득** (00-40-56 41:54, 03-02-03 14:15), 02-21-23 54:20은 **미탐 유지가 정상**
+  (base 8이 EXCLUDE_DIGITS로 미판독 → ΔK 확정 불가. selftest ④에 명시. HMM 카드로 이월).
+  이론치 recall 25/26 = 96.2%.
+- **상실 0 필수.** 특히 확인할 기존 TP: 02-21-23 79:51(팬텀-8 케이스 — 정산 방식에선
+  그레이스가 7→9 gap 2킬을 직전 라운드로 귀속해 커버할 것으로 설계됨. `_tp_diff`에서
+  상실로 나오면 해당 구간 덤프 후 보고), 23-51-52 16:23(그레이스), 02-34-09 2:49(경계 검증).
+- 상실 발생 시: 해당 GT 구간 `--dump` → 원인 분류 → **`hud_round_settle.py`의 상수 스윕**
+  (`_SUPPORT_SINGLE_CONF` 0.84~0.95, `_RESET_PENALTY` 1.0~4.0, `_GRACE_SEC` 6~12)으로
+  해결 시도. 로직 자체 변경은 selftest 6종 + 상실 0을 모두 유지할 때만.
+
+## Task 3 — precision 정리 (목표 ≥80%)
+
+R2 시점 FP 8건(00-40-56 3, 02-34-09 2, 02-03-10 1, 23-51-52 1, 02-21-23 1).
+정산 방식은 (a) 스퓨리어스-0 리셋 오탐 (b) 오염 이월발 가짜 +3을 구조적으로 제거하므로
+FP 감소 기대. 남는 FP는 각각 덤프로 분류하고, 위 상수 + `_MIN_ROUND_K_SAMPLES` 스윕.
+**recall을 깎는 트레이드는 diff 표로 명시하고 중단** — 총점 개선이라도 TP 상실이 있으면 보고.
+
+## Task 4 — 마무리
+
+1. 실스캔 일치 확인 1회 (짧은 영상 1개 `detect_ace_hud.py` 직접 실행 vs 캐시 재계산).
+2. 구 `_KTracker`·`_postprocess_kills`(팬텀-8)·`_kill_round_index` 등 대체된 코드 정리
+   (완전 삭제 대신 파일 하단 주석 블록 or git 히스토리 의존 — 판단 맡김, 단 import 오류 없게).
+3. `python -u _tp_diff.py --save-baseline r3_final` 저장.
+4. `HUD_ACE_HANDOFF.md` §0에 R3 절 추가(수치 표·per-video·남은 미탐), 이 파일 헤더 갱신, 커밋.
+5. 배치 37~113 재개는 **사용자 승인 후** (변경 금지).
+
+## 금지·주의 (R3 추가분)
+
+- `hud_round_settle.py`의 DP·이월 로직 수정 시 반드시 selftest 6종 유지 + 수정 근거를
+  모듈 docstring에 추가. **실측 픽스처(①~⑥)는 삭제 금지.**
+- 8 템플릿 재설치 금지 (EXCLUDE_DIGITS 유지 — 근거는 핸드오프 ★★★★ 절).
+- 캐시(sig_cache_v2·boundary.json)는 그대로 재사용 — 판독 로직을 안 건드리므로 재캐시 불필요.
+- 절대 규칙(§0) 전부 유효: ace=정확히 3, GT 26건이 유일 기준, M:SS 보고.

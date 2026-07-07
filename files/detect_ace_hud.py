@@ -18,6 +18,7 @@ import cv2
 from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher
 from hud_kda import read_kda_triple_from_game
+from hud_round_settle import SettledRound, settle_rounds
 
 DEFAULT_DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 DEFAULT_OUTPUT_DIR = Path(r"E:\clipai_result\ace_clips_hud")
@@ -582,6 +583,62 @@ def collect_reads(
     return reads, duration, None
 
 
+def _rounds_from_settled(
+    settled: list[SettledRound], ace_kills: int
+) -> tuple[list[RoundTrack], list[KillEvent], list[list[float]]]:
+    """SettledRound(라운드별 독립 정산 결과) → RoundTrack/JSON 스키마 매핑 + ace 판정.
+
+    R3(2026-07-07): `_KTracker`(전역 순차 상태머신) + `_build_rounds`/`_assign_events`
+    (킬 귀속부)를 대체. ace 판정식(kills==정확히3·resets==0·span·G5)은 기존과 동일 —
+    `hud_round_settle.settle_rounds`가 라운드별 kills/kill_times/reset/k_samples까지
+    정산해 넘겨주므로 여기서는 그 값으로 판정만 한다.
+    """
+    rounds: list[RoundTrack] = []
+    kill_events: list[KillEvent] = []
+    reset_events: list[list[float]] = []
+
+    for sr in settled:
+        kt = sorted(sr.kill_times)
+        r = RoundTrack(
+            round_index=sr.index,
+            start_sec=sr.start_sec,
+            end_sec=sr.end_sec,
+            kills=sr.kills,
+            kill_times=kt,
+            resets=1 if sr.reset else 0,
+            reset_times=[sr.start_sec] if sr.reset else [],
+            k_samples=sr.k_samples,
+        )
+        if kt:
+            r.first_kill_sec = kt[0]
+            if len(kt) >= ace_kills:
+                r.ace_sec = kt[ace_kills - 1]
+        span = (
+            (r.ace_sec - r.first_kill_sec)
+            if (r.ace_sec is not None and r.first_kill_sec is not None)
+            else 0.0
+        )
+        r.ace = (
+            r.kills == ace_kills
+            and r.resets == 0
+            and span <= _MAX_ACE_SPAN_SEC
+            and r.k_samples >= _MIN_ROUND_K_SAMPLES
+        )
+        rounds.append(r)
+
+        # 진단용 재구성(kill_events/reset_events) — GT 비교 도구는 rounds[]만 읽으므로
+        # 여기 값이 소수점 단위로 정확할 필요는 없음(사람이 눈으로 볼 진단 필드).
+        base = sr.k_base if sr.k_base is not None else 0
+        for i, t in enumerate(kt):
+            kill_events.append(KillEvent(t=t, from_k=base + i, to_k=base + i + 1))
+        if sr.reset:
+            reset_events.append(
+                [sr.start_sec, float(sr.k_base or 0), float(sr.k_start or 0)]
+            )
+
+    return rounds, kill_events, reset_events
+
+
 def timeline_from_reads(
     reads: list[KRead],
     *,
@@ -596,6 +653,10 @@ def timeline_from_reads(
     판정 로직의 단일 진입점: 실스캔(scan_hud_aces)과 캐시 재계산(hud_from_cache)이
     모두 이 함수를 쓰므로 로직 수정 시 두 경로가 자동 일치.
 
+    R3(2026-07-07): 라운드 분할 후 킬 귀속·ace 판정은 `hud_round_settle.settle_rounds`
+    (라운드별 독립 정산 — 전역 상태 없음)로 위임. 구 `_KTracker` 경로는 참고용으로
+    파일 하단에 남겨둠(대체 완료, 미사용).
+
     boundary_verdicts: R2 Task 1(전광판 CNN 스팟검증) 결과 — `[[start, last, bool], ...]`.
     None이면 검증 없이 모든 row_miss run을 경계로 인정(기존 동작과 완전 동일, 회귀 없음).
     특정 run이 False(가짜 경계)로 판정되면 그 run은 경계 목록에서 제외 — 두 라운드가
@@ -606,18 +667,14 @@ def timeline_from_reads(
         scan_fps=scan_fps,
         ace_kills=ace_kills,
     )
-    tracker = _KTracker()
-    k_read_times: list[float] = []  # K 판독 성공 시각 (라운드 신뢰도 G5 집계용)
 
     for r in reads:
         if r.k is not None:
             timeline.k_template_hits += 1
-            k_read_times.append(r.t)
         elif r.method in ("template_miss", "triple_incomplete"):
             timeline.k_template_miss += 1
         elif r.method == "row_miss":
             timeline.k_row_miss += 1
-        tracker.update(r.t, r.k, r.conf)
 
     boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
     for (start, last, _n) in rowmiss_runs(reads):
@@ -627,16 +684,16 @@ def timeline_from_reads(
                 continue  # 가짜 경계(전광판 미확인) — 폐기, 두 라운드 병합
         boundaries.append((start + last) / 2)
 
-    rounds = _build_rounds(boundaries, tracker, duration)
-    timeline.hud_end_count = len(boundaries)
-    processed_kills = _postprocess_kills(list(tracker.kills), reads, boundaries)
-    _assign_events(
-        rounds, processed_kills, k_read_times, boundaries, reads, tracker.resets
+    settled = settle_rounds(
+        [(r.t, r.k, r.conf) for r in reads], boundaries, duration
     )
+    rounds, kill_events, reset_events = _rounds_from_settled(settled, ace_kills)
+
     timeline.rounds = rounds
+    timeline.hud_end_count = len(boundaries)
     timeline.ace_rounds = [r.round_index for r in rounds if r.ace]
-    timeline.kill_events = processed_kills
-    timeline.reset_events = [[t, float(o), float(n)] for (t, o, n) in tracker.resets]
+    timeline.kill_events = kill_events
+    timeline.reset_events = reset_events
 
     if timeline.k_template_hits == 0:
         timeline.warnings.append("k_never_read")

@@ -60,9 +60,11 @@ def process_video(
     scan_fps: float,
     min_duration_sec: float,
     extract: bool,
+    json_dir: Path = HUD_JSON_DIR,
+    clips_dir: Path = HUD_CLIPS_DIR,
 ) -> dict:
     stem = mp4.stem
-    json_out = HUD_JSON_DIR / f"{stem}.json"
+    json_out = json_dir / f"{stem}.json"
     result: dict = {"stem": stem, "ok": False, "aces": [], "error": None, "clips": 0}
 
     if min_duration_sec > 0:
@@ -79,7 +81,7 @@ def process_video(
             result["ok"] = True
             result["cached"] = True
             if extract and tl.ace_rounds:
-                clips = extract_ace_clips(mp4, tl, HUD_CLIPS_DIR)
+                clips = extract_ace_clips(mp4, tl, clips_dir)
                 result["clips"] = len(clips)
             result["sec"] = round(time.time() - t0, 1)
             return result
@@ -88,13 +90,13 @@ def process_video(
 
     try:
         tl = scan_hud_aces(mp4, scan_fps=scan_fps, dataset_root=DATASET_ROOT)
-        HUD_JSON_DIR.mkdir(parents=True, exist_ok=True)
+        json_dir.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8")
         print(format_report(tl), flush=True)
         result["aces"] = tl.ace_rounds
         result["ok"] = True
         if extract and tl.ace_rounds:
-            clips = extract_ace_clips(mp4, tl, HUD_CLIPS_DIR)
+            clips = extract_ace_clips(mp4, tl, clips_dir)
             result["clips"] = len(clips)
     except Exception as exc:
         result["error"] = str(exc)
@@ -114,7 +116,22 @@ def main() -> int:
     ap.add_argument("--min-duration-sec", type=float, default=120.0)
     ap.add_argument("--no-extract", action="store_true", help="JSON만, 클립 추출 생략")
     ap.add_argument("--obs-dir", default=str(OBS_DIR))
+    ap.add_argument(
+        "--output-root",
+        default=None,
+        help="산출물 루트 재지정 (예: D:\\hud_result) — 미지정시 E:\\clipai_result 기존 경로",
+    )
     args = ap.parse_args()
+
+    if args.output_root:
+        out_root = Path(args.output_root)
+        json_dir = out_root / "hud_timeline"
+        clips_dir = out_root / "ace_clips_hud"
+        summary_path = out_root / "batch_hud_summary.json"
+    else:
+        json_dir = HUD_JSON_DIR
+        clips_dir = HUD_CLIPS_DIR
+        summary_path = SUMMARY_PATH
 
     obs = Path(args.obs_dir)
     videos = sorted(obs.glob("*.mp4"))
@@ -135,6 +152,8 @@ def main() -> int:
             scan_fps=args.scan_fps,
             min_duration_sec=args.min_duration_sec,
             extract=not args.no_extract,
+            json_dir=json_dir,
+            clips_dir=clips_dir,
         )
         summary.append(r)
         if r["ok"]:
@@ -150,8 +169,9 @@ def main() -> int:
     ok = [r for r in summary if r["ok"]]
     total_aces = sum(len(r["aces"]) for r in ok)
     print(f"\n[hud-batch] 완료 {len(ok)}/{len(summary)}  총 올킬 {total_aces}개", flush=True)
-    SUMMARY_PATH.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[hud-batch] 요약 -> {SUMMARY_PATH}", flush=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[hud-batch] 요약 -> {summary_path}", flush=True)
     return 0
 
 

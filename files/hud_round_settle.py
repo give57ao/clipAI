@@ -40,6 +40,17 @@ _CARRY_MAX_GAP_SEC = 180.0   # k_base 이월 유효 시간 (이보다 오래 판
 _GRACE_SEC = 10.0            # 경계 직후 첫 관측이 곧 증가값이면 직전 라운드 킬로 귀속
 _GRACE_MAX_KILLS = 2         # 그레이스로 넘길 수 있는 최대 킬 수 (R2 Task 2와 동일)
 
+# --- 8-엔드포인트 보정 (R5, 2026-07-09 미탐 43건 검수 — 9건이 K 시작/끝값 8) ---
+# 8은 EXCLUDE_DIGITS(구조적 미판독)라 K가 8인 상태는 절대 관측되지 않는다.
+# Rule A: 이월 무효 상태에서 라운드가 9로 시작 + 마지막 알려진 K ≤7
+#         → 보이지 않는 8을 거쳐온 것. 이 라운드 몫은 8→9 한 킬뿐 (k_base=8).
+#         (실측: 02-21-23 54:20 '8/8→11/8' — base 8이라 ΔK 산정 불가였던 케이스)
+# Rule B: 직전 라운드가 2킬로 7에서 끝났고 이 라운드가 9로 시작(7→9, 사이 8 미판독)
+#         → 3번째 킬(7→8)은 직전 라운드 말미 — 브리지해 직전 라운드를 3킬로 완성.
+#         (실측: 02-21-23 79:51 '5/6→8/6', 00-36-50 40:37 '5/1→8/1' 등 end-8 4건+)
+# ⚠ 8 템플릿이 부활하면(EXCLUDE_DIGITS 해제) 두 규칙 모두 전제가 깨짐 — 함께 제거할 것.
+_BRIDGE_8 = True
+
 # --- D(데스) 채널 가드 (2026-07-09, 사용자 오탐 12건 검수 기반) ---
 # 도메인: 본인 D는 라운드 내 사망(+1) 외엔 변할 수 없다. 라운드 중 지지된 D 변화
 # = 사망(상승) 또는 관전 화면 오독(임의 변화, 죽으면 팀원 K/D가 패널에 노출됨 —
@@ -207,8 +218,25 @@ def settle_rounds(
                 and 0 <= r.k_start - carry_k <= _MAX_STEP
             ):
                 r.k_base = carry_k
+            elif _BRIDGE_8 and r.k_start == 9 and carry_k is not None and carry_k <= 7:
+                r.k_base = 8  # Rule A — 보이지 않는 8 경유, 8→9만 이 라운드 몫
             else:
                 r.k_base = r.k_start  # 이월 불가(하프타임 하락·큰 점프·공백) → 새 기준
+            # Rule B — end-8 크로스라운드 브리징 (상단 _BRIDGE_8 주석 참고)
+            if (
+                _BRIDGE_8
+                and r.k_base == 7
+                and r.k_start == 9
+                and rounds
+                and rounds[-1].kills == 2
+                and not rounds[-1].reset
+            ):
+                prev_r = rounds[-1]
+                prev_r.kills += 1
+                prev_r.kill_times.append(prev_r.end_sec)
+                if prev_r.k_end is not None:
+                    prev_r.k_end = 8
+                r.k_base = 8
             gap = r.k_start - r.k_base
             if gap > 0:
                 # 경계 그레이스: 경계 직후 곧바로 +1/+2 상태로 관측되면 그 킬은
@@ -358,7 +386,31 @@ def _selftest() -> None:
     rs = settle_rounds(reads8, [], 60.0, d_reads=d8)
     assert rs[0].kills == 3 and rs[0].d_guard_dropped == 0, f"case8: {rs[0]}"
 
-    print("hud_round_settle selftest: 8/8 OK")
+    # ⑨ Rule A — 이월 만료 + 라운드가 9로 시작 + 마지막 K는 7 이하 → k_base=8
+    #    (02-21-23 54:20 '8/8→11/8' 유형: 8이 미판독이라 base를 못 잡던 케이스)
+    reads9 = _fx(
+        (10.0, 7, 0.9, 6, 1.0),             # 마지막 알려진 K=7 (이후 200s 공백 → 이월 만료)
+        (235.0, 9, 0.9, 4, 1.0),            # 라운드 시작값 9 (보이지 않는 8 경유, 경계+15s)
+        (245.0, 10, 0.9, 3, 1.0),
+        (255.0, 11, 0.9, 6, 1.0),
+    )
+    rs = settle_rounds(reads9, [220.0], 270.0)
+    r = rs[-1]
+    assert r.k_base == 8 and r.kills == 3, f"case9: {r}"
+
+    # ⑩ Rule B — 직전 라운드 2킬로 7 종료 + 다음 라운드 9 시작 → 3번째 킬(7→8) 브리지
+    #    (02-21-23 79:51 '5/6→8/6' 유형: end-8 미탐)
+    reads10 = _fx(
+        (10.0, 5, 0.9, 6, 1.0),
+        (25.0, 6, 0.9, 4, 1.0),
+        (35.0, 7, 0.9, 6, 1.0),             # 2킬로 7에서 라운드 종료 (진짜 3번째 킬 8은 미판독)
+        (75.0, 9, 0.9, 6, 1.0),             # 다음 라운드, 경계+15s (그레이스 밖)에 9 등장
+    )
+    rs = settle_rounds(reads10, [60.0], 100.0)
+    assert rs[0].kills == 3 and rs[0].k_end == 8, f"case10 prev: {rs[0]}"
+    assert rs[1].kills == 1 and rs[1].k_base == 8, f"case10 cur: {rs[1]}"
+
+    print("hud_round_settle selftest: 10/10 OK")
 
 
 if __name__ == "__main__":

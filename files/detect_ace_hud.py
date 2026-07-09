@@ -564,10 +564,13 @@ def collect_reads(
                 break
             t = frame_idx / fps
             game, _ = extract_game_crop_bgr(frame, dataset_root=dataset_root)
-            # 오독 방어: K/D/A 세 슬롯 모두 파싱된 프레임만 채택 —
-            # 행이 배너·페이드로 오염되면 보통 셋 다 깨짐
+            # 오독 방어: 배너·페이드 오염 시 보통 세 슬롯이 다 깨지므로 동반 슬롯을
+            # 요구한다. 단 R5(2026-07-09): 트리플(D와 A 모두) 요구는 D=8 정전을 유발
+            # — 8은 EXCLUDE_DIGITS라 D가 8인 구간은 모든 프레임이 통째로 버려져
+            # 완전 미탐 발생 (실측: 05-23 02-48-06 '7/8→10/8', 05-26 23-45-51
+            # '6/8→9/8' 구간). D 또는 A 중 하나만 파싱돼도 채택(더블 가드)으로 완화.
             k, d, a, conf, method = read_kda_triple_from_game(game)
-            if k is not None and (d is None or a is None):
+            if k is not None and d is None and a is None:
                 k = None
                 method = "triple_incomplete"
             reads.append(KRead(t=t, k=k, conf=float(conf), method=method, d=d, a=a))

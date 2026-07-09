@@ -62,9 +62,11 @@ def build_cache(video_path: Path, cache_dir: Path, scan_fps: float, force: bool)
         "stem": video_path.stem,
         "scan_fps": scan_fps,
         "duration": duration,
-        # [t, k(null 가능), conf(소수3), method 1글자]
+        # [t, k(null 가능), conf(소수3), method 1글자, d(null 가능), a(null 가능)]
+        # d/a는 2026-07-09 추가 — 구 캐시(4원소 행)는 로더가 d=a=None으로 읽음
         "reads": [
-            [round(r.t, 3), r.k, round(r.conf, 3), _METHOD_CODE.get(r.method, "?")]
+            [round(r.t, 3), r.k, round(r.conf, 3), _METHOD_CODE.get(r.method, "?"),
+             r.d, r.a]
             for r in reads
         ],
     }

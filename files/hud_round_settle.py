@@ -40,6 +40,14 @@ _CARRY_MAX_GAP_SEC = 180.0   # k_base 이월 유효 시간 (이보다 오래 판
 _GRACE_SEC = 10.0            # 경계 직후 첫 관측이 곧 증가값이면 직전 라운드 킬로 귀속
 _GRACE_MAX_KILLS = 2         # 그레이스로 넘길 수 있는 최대 킬 수 (R2 Task 2와 동일)
 
+# --- D(데스) 채널 가드 (2026-07-09, 사용자 오탐 12건 검수 기반) ---
+# 도메인: 본인 D는 라운드 내 사망(+1) 외엔 변할 수 없다. 라운드 중 지지된 D 변화
+# = 사망(상승) 또는 관전 화면 오독(임의 변화, 죽으면 팀원 K/D가 패널에 노출됨 —
+# 실측: 2026-05-31 21-57-14 R139, 14/10 관전 오독 올킬 FP). 사망/관전 시각 이후의
+# K 상승은 본인 킬이 아니므로 무효화. 트레이드킬(사망과 동시 킬)은 마진으로 허용.
+_D_GUARD_MARGIN_SEC = 2.0    # 사망과 사실상 동시(트레이드킬)의 킬은 유효
+_D_SUPPORT_MIN = 2           # 가드용 D 지지: 같은 값 2회 이상 (단발 conf 예외 없음 — 보수적)
+
 
 @dataclass
 class SettledRound:
@@ -54,6 +62,7 @@ class SettledRound:
     reset: bool = False         # 체인이 리셋 간선을 썼음 (하프타임/리조인) → ace 제외 대상
     k_samples: int = 0          # 라운드 내 성공 판독 총 수 (G5 지표, 필터 전 원시 기준)
     chain_reads: int = 0        # 체인에 채택된 판독 수 (진단용)
+    d_guard_dropped: int = 0    # D-가드가 무효화한 킬 수 (진단용, 2026-07-09)
 
 
 def _supported_obs(
@@ -71,6 +80,25 @@ def _supported_obs(
         if count[k] >= _SUPPORT_MIN_READS or best[k] >= _SUPPORT_SINGLE_CONF
     }
     return [(t, k, c) for (t, k, c) in obs if k in ok]
+
+
+def _d_anomaly_t(d_obs: list[tuple[float, int, float]]) -> float | None:
+    """라운드 내 D 채널 이상 시각 — 지지(같은 값 ≥_D_SUPPORT_MIN회) D가 기준값에서
+    변하는 첫 시각. 상승=본인 사망, 하락=관전/오독 — 어느 쪽이든 이후 K 상승은
+    본인 킬이 아님. 이상 없으면 None."""
+    count: dict[int, int] = {}
+    for _t, d, _c in d_obs:
+        count[d] = count.get(d, 0) + 1
+    ok = {d for d in count if count[d] >= _D_SUPPORT_MIN}
+    base: int | None = None
+    for t, d, _c in sorted(d_obs, key=lambda x: x[0]):
+        if d not in ok:
+            continue
+        if base is None:
+            base = d
+        elif d != base:
+            return t
+    return None
 
 
 def _best_chain(
@@ -125,11 +153,14 @@ def settle_rounds(
     reads: list[tuple[float, int | None, float]],
     boundaries: list[float],
     duration: float,
+    d_reads: list[tuple[float, int, float]] | None = None,
 ) -> list[SettledRound]:
     """세그먼트별 독립 정산 + k_base 이월 + 경계 그레이스 귀속.
 
     reads: (t, k|None, conf) — k=None(판독 실패)은 k_samples 집계에서만 제외.
     boundaries: 라운드 경계 시각 (row_miss run 중앙, CNN 검증 반영 후) — 정렬 가정 안 함.
+    d_reads: (t, d, conf) — D(데스) 슬롯 판독 (d=None 제외 후 전달). None/빈 리스트면
+             D-가드 완전 비활성 (구 캐시 하위호환 — 기존 동작과 100% 동일).
     """
     seps = sorted(set(b for b in boundaries if 0.0 < b < duration))
     segs: list[tuple[float, float]] = []
@@ -195,6 +226,15 @@ def settle_rounds(
                     r.k_base = r.k_start
                 else:
                     r.kill_times = [first_t] * gap + r.kill_times
+            # D-채널 가드 (2026-07-09): 라운드 내 사망/관전 이상 시각 이후 킬 무효화.
+            # 사용자 오탐 검수 실측 — 죽으면 팀원 관전 화면의 K/D가 본인 것으로 오독됨.
+            if d_reads and r.kill_times:
+                d_obs = [(t, d, c) for (t, d, c) in d_reads if s <= t < e]
+                anom_t = _d_anomaly_t(d_obs)
+                if anom_t is not None:
+                    kept = [t for t in r.kill_times if t <= anom_t + _D_GUARD_MARGIN_SEC]
+                    r.d_guard_dropped = len(r.kill_times) - len(kept)
+                    r.kill_times = kept
             r.kills = len(r.kill_times)
             carry_k = r.k_end
             carry_t = chain[-1][0]
@@ -285,7 +325,40 @@ def _selftest() -> None:
     assert rs[0].kills == 1 and rs[0].kill_times == [m(16, 46)], f"case6 prev: {rs[0]}"
     assert rs[1].kills == 0, f"case6 cur: {rs[1]}"
 
-    print("hud_round_settle selftest: 6/6 OK")
+    # ⑦ D-가드 — 라운드 중 사망(D 4→5 지지 상승) 후의 K 상승은 관전 오독 → 무효
+    #    (실측 유형: 2026-05-31 21-57-14 R139 — 죽고 팀원 관전, 팀원 K/D 14/10 오독)
+    reads7 = _fx(
+        (10.0, 6, 0.9, 6, 1.0),            # 본인 K=6 안정
+        (30.0, 7, 0.9, 4, 1.0),            # 진짜 킬 +1 (사망 전) → 유효
+        (40.0, 9, 0.9, 6, 1.0),            # 사망(35s) 후 관전 K → 무효여야 함
+    )
+    d7 = _fx(
+        (10.0, 4, 0.9, 24, 1.0),           # D=4 안정
+        (35.0, 5, 0.9, 10, 1.0),           # 사망: D 4→5 (지지 2회 이상)
+    )
+    rs = settle_rounds(reads7, [], 60.0, d_reads=d7)
+    r = rs[0]
+    assert r.kills == 1 and r.d_guard_dropped == 2, f"case7: {r}"
+
+    # ⑦' 같은 판독에서 d_reads 없으면(구 캐시) 가드 비활성 — 기존 동작 그대로
+    rs = settle_rounds(reads7, [], 60.0)
+    assert rs[0].kills == 3 and rs[0].d_guard_dropped == 0, f"case7-nod: {rs[0]}"
+
+    # ⑧ 트레이드킬 — 3번째 킬이 사망과 사실상 동시(마진 내)면 ACE 유지
+    reads8 = _fx(
+        (10.0, 0, 0.9, 6, 1.0),
+        (20.0, 1, 0.9, 4, 1.0),
+        (30.0, 2, 0.9, 4, 1.0),
+        (40.0, 3, 0.9, 6, 1.0),            # 3번째 킬 (40s) — 사망(41s)과 1초 차
+    )
+    d8 = _fx(
+        (10.0, 2, 0.9, 30, 1.0),
+        (41.0, 3, 0.9, 8, 1.0),            # 트레이드 사망
+    )
+    rs = settle_rounds(reads8, [], 60.0, d_reads=d8)
+    assert rs[0].kills == 3 and rs[0].d_guard_dropped == 0, f"case8: {rs[0]}"
+
+    print("hud_round_settle selftest: 8/8 OK")
 
 
 if __name__ == "__main__":

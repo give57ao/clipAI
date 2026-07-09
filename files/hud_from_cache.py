@@ -37,8 +37,11 @@ def _parse_mss(s: str) -> float:
 def load_reads(cache_path: Path) -> tuple[list[KRead], float, float, str]:
     data = json.loads(cache_path.read_text(encoding="utf-8"))
     reads = [
-        KRead(t=t, k=k, conf=c, method=METHOD_DECODE.get(m, m))
-        for t, k, c, m in data["reads"]
+        # 구 스키마(4원소)와 신 스키마(6원소, d/a 포함 — 2026-07-09) 모두 지원
+        KRead(t=row[0], k=row[1], conf=row[2], method=METHOD_DECODE.get(row[3], row[3]),
+              d=row[4] if len(row) > 4 else None,
+              a=row[5] if len(row) > 5 else None)
+        for row in data["reads"]
     ]
     return reads, data["duration"], data.get("scan_fps", 4.0), data["stem"]
 

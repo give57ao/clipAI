@@ -85,11 +85,15 @@ class KRead:
     """프레임 1개의 원시 K 판독 — 신호 캐시의 단위 (hud_sig_cache.py).
 
     method: 'template'(성공) | 'template_miss' | 'row_miss' | 'triple_incomplete'
+    d/a: D(데스)/A(어시) 슬롯 — 2026-07-09 오탐 검수로 필요성 확정 (사망·관전 오독
+         판별에 D 채널이 결정적). 구 캐시에는 없음 → None (가드 자동 비활성).
     """
     t: float
     k: int | None
     conf: float
     method: str
+    d: int | None = None
+    a: int | None = None
 
 
 @dataclass
@@ -566,7 +570,7 @@ def collect_reads(
             if k is not None and (d is None or a is None):
                 k = None
                 method = "triple_incomplete"
-            reads.append(KRead(t=t, k=k, conf=float(conf), method=method))
+            reads.append(KRead(t=t, k=k, conf=float(conf), method=method, d=d, a=a))
         else:
             if not cap.grab():
                 break
@@ -685,7 +689,9 @@ def timeline_from_reads(
         boundaries.append((start + last) / 2)
 
     settled = settle_rounds(
-        [(r.t, r.k, r.conf) for r in reads], boundaries, duration
+        [(r.t, r.k, r.conf) for r in reads], boundaries, duration,
+        # D(데스) 채널 — 사후킬/관전 가드용 (2026-07-09). 구 캐시엔 d=None → 가드 no-op.
+        d_reads=[(r.t, r.d, r.conf) for r in reads if r.d is not None],
     )
     rounds, kill_events, reset_events = _rounds_from_settled(settled, ace_kills)
 

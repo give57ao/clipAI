@@ -518,19 +518,40 @@ def scan_hud_aces(
     scan_fps: float = 4.0,
     ace_kills: int = ACE_KILLS,
     dataset_root: Path | None = None,
+    verify_boundaries: bool = True,
 ) -> HudAceTimeline:
+    """R5(2026-07-09): verify_boundaries=True(기본)면 row_miss 경계 후보를 전광판
+    CNN으로 스팟 검증(R2 Task 1) — 지금까지 hud_from_cache.py(라벨 10영상 전용
+    실험 경로)에만 연결돼 있었고, 실제 배치 스캔(이 함수)에는 연결이 안 돼 있던
+    구조적 공백이었음. 실측(2026-07-09): MULTI/DOUBLE KILL 연출이 HUD를 4~5초
+    가리는 게 짧은 row_miss run으로 잡혀 진짜 라운드가 쪼개지는 사례를 04-13
+    22-46-39(12:46-12:52, K 3→3 불변·D 1 불변인데 라운드 분리됨), 04-24 00-43-29
+    등에서 확인 — 검증기가 이미 겨냥하던 실패 모드와 정확히 일치.
+    모델 로드 실패(CUDA 문제 등) 시 경고만 남기고 검증 없이 진행(회귀 없음)."""
     reads, duration, err = collect_reads(
         Path(video_path), scan_fps=scan_fps, dataset_root=dataset_root
     )
+    boundary_verdicts = None
+    boundary_warning = None
+    if verify_boundaries:
+        try:
+            from hud_boundary_verify import get_boundary_verifier, verify_runs_live
+            model, transform, device = get_boundary_verifier()
+            boundary_verdicts = verify_runs_live(Path(video_path), reads, model, transform, device)
+        except Exception as exc:  # noqa: BLE001 — 검증은 부가 기능, 실패해도 스캔은 진행
+            boundary_warning = f"boundary_verify_failed:{exc}"
     timeline = timeline_from_reads(
         reads,
         duration=duration,
         video_path=Path(video_path),
         scan_fps=scan_fps,
         ace_kills=ace_kills,
+        boundary_verdicts=boundary_verdicts,
     )
     if err:
         timeline.warnings.append(err)
+    if boundary_warning:
+        timeline.warnings.append(boundary_warning)
     return timeline
 
 

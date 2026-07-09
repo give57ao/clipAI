@@ -83,32 +83,41 @@ def _load_cached_reads(cache_path: Path) -> tuple[list[KRead], str]:
     return reads, data["stem"]
 
 
-def verify_video(
-    stem: str,
-    cache_dir: Path,
+_model_cache: dict = {}
+
+
+def get_boundary_verifier(device: torch.device | None = None):
+    """모델 지연 로드 + 프로세스 전역 캐시 (배치 루프에서 영상마다 재로드 방지).
+
+    R5(2026-07-09): scan_hud_aces에 연결하기 위해 verify_video에서 분리.
+    """
+    if not _model_cache:
+        dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, img_size = load_scoreboard_model(dev)
+        _model_cache["model"] = model
+        _model_cache["transform"] = build_eval_transform(img_size)
+        _model_cache["device"] = dev
+    return _model_cache["model"], _model_cache["transform"], _model_cache["device"]
+
+
+def verify_runs_live(
+    video_path: Path,
+    reads: list[KRead],
     model,
     transform,
     device: torch.device,
-    obs_dir: Path,
-) -> None:
-    cp = cache_dir / f"{stem}.json"
-    if not cp.exists():
-        print(f"[boundary] 캐시 없음: {stem}")
-        return
-    reads, _ = _load_cached_reads(cp)
+) -> list[list]:
+    """row_miss run 후보를 영상에서 직접 seek해 CNN 검증 (캐시/사전작업 불필요).
+
+    R5(2026-07-09): scan_hud_aces·verify_video 공용 코어. 반환은
+    timeline_from_reads(boundary_verdicts=...)가 바로 소비하는 형식.
+    """
     runs = rowmiss_runs(reads)
     if not runs:
-        print(f"[boundary] {stem}: row_miss run 후보 없음")
-        return
-
-    vp = obs_dir / f"{stem}.mp4"
-    if not vp.exists():
-        print(f"[boundary] 영상 없음: {vp}")
-        return
-    cap = cv2.VideoCapture(str(vp))
+        return []
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"[boundary] 영상 열기 실패: {vp}")
-        return
+        return []
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     verdicts: list[list] = []
@@ -127,6 +136,32 @@ def verify_video(
             best = max(best, prob)
         verdicts.append([start, last, best >= SCORE_THRESHOLD])
     cap.release()
+    return verdicts
+
+
+def verify_video(
+    stem: str,
+    cache_dir: Path,
+    model,
+    transform,
+    device: torch.device,
+    obs_dir: Path,
+) -> None:
+    cp = cache_dir / f"{stem}.json"
+    if not cp.exists():
+        print(f"[boundary] 캐시 없음: {stem}")
+        return
+    reads, _ = _load_cached_reads(cp)
+    vp = obs_dir / f"{stem}.mp4"
+    if not vp.exists():
+        print(f"[boundary] 영상 없음: {vp}")
+        return
+
+    runs = rowmiss_runs(reads)
+    if not runs:
+        print(f"[boundary] {stem}: row_miss run 후보 없음")
+        return
+    verdicts = verify_runs_live(vp, reads, model, transform, device)
 
     out = cache_dir / f"{stem}.boundary.json"
     out.write_text(json.dumps({"runs": verdicts}, ensure_ascii=False, indent=2), encoding="utf-8")

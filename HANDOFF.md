@@ -1,18 +1,34 @@
 # clipAI 세션 핸드오프
 
-> 마지막 업데이트: 2026-07-09 (KST)  
+> 마지막 업데이트: 2026-07-10 (KST)  
 > 다음 채팅에서 이 파일을 먼저 읽고 이어서 작업하세요.
 
-## ★ HUD 올킬 파이프라인 (2026-07-09 GT 확장 — recall 급락 발견)
+## ★ HUD 올킬 파이프라인 (2026-07-10 R5 완료 — recall 54.6%→66.7%)
 
-**닉·스코어보드 없이** HUD K/D/A로 올킬 탐지 — E:\OBS 93/102 배치 처리 완료, 사용자가
-그 결과를 직접 확인하며 GT를 **10영상/26건 → 60영상/93건**으로 확장.
+**닉·스코어보드 없이** HUD K/D/A로 올킬 탐지. 사용자 육안 검수로 GT를
+**60영상/96건**으로 확장하고, R5에서 근본 원인 3개를 규명·수정.
 
-- **상세 핸드오프**: [`HUD_ACE_HANDOFF.md`](HUD_ACE_HANDOFF.md) ← **전체 60영상 대조: recall 52.7% (49/93), precision 65.3%** (라벨 10영상 튜닝 수치 88.5%는 일반화 안 됨 — 원인 조사 필요)
-- **코드**: `detect_ace_hud.py`, `hud_boundary_verify.py`, `hud_from_cache.py`, `_tp_diff.py`, `_compare_hud_gt.py`(GT 단일 진처), `_reorg_highlights.py`/`_delete_stale_clips.py`(클립 정리, 신규)
-- **측정**: `_compare_hud_gt.py` (GT 딕셔너리가 최신 60영상 기준으로 갱신됨)
-- **클립 폴더**: `E:\clipai_result\ace_clips_hud\`가 평탄화됨(`<날짜>_하이라이트(n).mp4`), 오탐 16건은 `_오탐\`로 분리, 구버전 잔재 116개/13.6GB 삭제
-- **다음**: recall 52.7%의 근본 원인 조사(10영상 밖에서 왜 안 맞는지) → D 드라이브 162개는 그 이후
+- **현재 성능**: **recall 66.7% (64/96), precision 71.1%** — 라벨 10영상 튜닝
+  수치(88.5%)가 일반화 안 된다는 착시를 GT 확장으로 규명하고, 진짜 baseline
+  54.6%에서 +12.1%p 끌어올림. 회귀 0(`_tp_diff` r5_final = 64/96).
+- **R5 핵심 수정 3건** (상세: [`HUD_ACE_HANDOFF.md`](HUD_ACE_HANDOFF.md) §0):
+  1. **전광판 CNN 경계검증을 실배치에 연결** — R2 개선이 `scan_hud_aces`에
+     한 번도 안 붙어있던 공백. MULTI KILL 연출이 라운드를 쪼개던 문제 해소.
+  2. **"스퓨리어스 0" = 화면의 8 오독 규명** — `hud_round_settle._quarantine_zeros`
+     (K 단조성 도메인 규칙으로 가짜 0 격리). 만성 K체인 파괴 원인.
+  3. **D/A 채널 기록 + D-가드 + gap 킬 시각 보정** (사망/관전 오독, GT창 이탈 방지).
+- **코드**: `detect_ace_hud.py`, `hud_round_settle.py`(정산 디코더), `hud_boundary_verify.py`,
+  `hud_from_cache.py`, `_compare_hud_gt.py`(GT 단일 진처, 96건), `_dump_reads_window.py`(구간 판독 덤프),
+  `_reorg_highlights.py`/`_delete_stale_clips.py`/`_extract_miss_clips.py`(클립 관리)
+- **하위 AI 작업 명세**: [`SONNET_TASK.md`](SONNET_TASK.md) R5 절 (덤프 진단→재캐시→재스캔→게이트)
+- **클립 폴더**: `E:\clipai_result\ace_clips_hud\` 평탄화(`<날짜>_하이라이트(n).mp4`),
+  오탐 `_오탐\`, 미탐 검수용 `_miss_review\`(43건)
+- **다음 (남은 숙제)**:
+  1. **E:\OBS 재처리 미완** — R5 수정 이전 stale JSON **75개** 재스캔 중단 상태
+     (todo 리스트: `scratchpad/obs_todo.txt`). `--redo`로 이어서 돌리면 됨.
+  2. **폭0 FP 분리** — "같은 순간 3킬"은 진짜/가짜 K채널 단독 분리 불가(재확인).
+     D채널 활용이 다음 카드(캐시에 D 저장됨).
+  3. **경계 넘는 미관측 첫 킬** (02-55-36 11→14 유형), 세이브 감지, D드라이브 162개.
 
 ## 보고·도메인 규칙 (2026-06-26 확정)
 

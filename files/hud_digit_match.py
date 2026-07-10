@@ -170,7 +170,14 @@ def match_glyph_iou(
     min_margin: float = _K_IOU_MARGIN,
 ) -> tuple[int | None, float]:
     """IoU + 마진 매칭: 1등이 min_score 이상이고 2등(다른 숫자)과 min_margin 이상
-    차이날 때만 채택. 모호하면 None — 상태머신이 미스로 안전 처리."""
+    차이날 때만 채택. 모호하면 None — 상태머신이 미스로 안전 처리.
+
+    ⚠ 8-거부권(0 매칭 시 _removed_8 템플릿과 재대조해 근접하면 None) 시도·철회
+    (2026-07-09 Fable): 프레임 검증으로 "화면의 8이 0으로 오독됨"은 확정했으나
+    (05-26 26:10, 실제 K/D/A 8/9/0 → K가 conf 0.7대 '0'), 글리프 IoU 마진으로는
+    분리 불가 실측 — 진짜 8의 (iou0−iou8) 마진 0.07~0.10 vs **깨끗한 진짜 0**의
+    마진 0.001~0.05로 역전돼 있어 어떤 임계값도 진짜 0을 먼저 죽임. 대응은
+    hud_round_settle._quarantine_zeros(K 단조성 도메인 규칙)로 이동 — 재시도 금지."""
     if glyph is None or not templates:
         return None, 0.0
     by_digit: dict[int, float] = {}

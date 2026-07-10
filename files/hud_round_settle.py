@@ -40,6 +40,16 @@ _CARRY_MAX_GAP_SEC = 180.0   # k_base 이월 유효 시간 (이보다 오래 판
 _GRACE_SEC = 10.0            # 경계 직후 첫 관측이 곧 증가값이면 직전 라운드 킬로 귀속
 _GRACE_MAX_KILLS = 2         # 그레이스로 넘길 수 있는 최대 킬 수 (R2 Task 2와 동일)
 
+# --- 0-격리 (R5, 2026-07-09 Fable — "스퓨리어스 0"의 정체 규명) ---
+# 프레임 육안 검증(05-26 23-45-51 26:10 — 실제 K/D/A "8/9/0"인데 K가 conf 0.7대
+# '0'으로 판독)으로, 만성적 "고신뢰 스퓨리어스 0"(00-40-56 42:24 conf 0.95,
+# 02-21-23 54:28, 05-23 45:58 등)의 정체가 **화면의 8이 가장 닮은 0으로
+# 오독되는 것**임을 확정. 0은 리셋 신호라 킬 체인을 통째로 파괴해 왔음.
+# 글리프 점수로는 0/8 분리 불가(실측, hud_digit_match.py 주석) → 도메인 규칙:
+# K는 리셋 외 단조증가 — **0 전후의 K가 이어지면(다음 K ≥ 이전 K) 그 0은 가짜**.
+# 진짜 리셋이면 이후 K는 반드시 이전보다 작게 다시 시작한다(0→1→2…).
+_ZERO_QUAR_LOOKAHEAD = 120.0  # 0 이후 다음 양수 K를 찾는 최대 시간 (초)
+
 # --- 8-엔드포인트 보정 (R5, 2026-07-09 미탐 43건 검수 — 9건이 K 시작/끝값 8) ---
 # 8은 EXCLUDE_DIGITS(구조적 미판독)라 K가 8인 상태는 절대 관측되지 않는다.
 # Rule A: 이월 무효 상태에서 라운드가 9로 시작 + 마지막 알려진 K ≤7
@@ -50,6 +60,13 @@ _GRACE_MAX_KILLS = 2         # 그레이스로 넘길 수 있는 최대 킬 수 
 #         (실측: 02-21-23 79:51 '5/6→8/6', 00-36-50 40:37 '5/1→8/1' 등 end-8 4건+)
 # ⚠ 8 템플릿이 부활하면(EXCLUDE_DIGITS 해제) 두 규칙 모두 전제가 깨짐 — 함께 제거할 것.
 _BRIDGE_8 = True
+
+# --- 약한 판독의 gap 상한 (R5, 2026-07-09 Fable — (a)형 폭0 오탐 대응) ---
+# carry~첫관측 사이에 지지 필터(n≥2 or conf≥0.88)에 걸러진 약한 판독이 중간값을
+# 증언하면, gap 킬 수를 그만큼 줄인다. 약한 증거는 "킬 수를 늘리는 방향"으로는
+# 못 쓰지만 "줄이는 방향"으로는 안전. 실측: 05-31 21-57-14 101:47의 '6'(conf
+# 0.67 단발)이 걸러져 carry(4)→7이 gap=3 거짓 올킬이 됨 — 6을 쓰면 gap=1로 정정.
+_GAP_WEAK_CAP = True
 
 # --- D(데스) 채널 가드 (2026-07-09, 사용자 오탐 12건 검수 기반) ---
 # 도메인: 본인 D는 라운드 내 사망(+1) 외엔 변할 수 없다. 라운드 중 지지된 D 변화
@@ -91,6 +108,46 @@ def _supported_obs(
         if count[k] >= _SUPPORT_MIN_READS or best[k] >= _SUPPORT_SINGLE_CONF
     }
     return [(t, k, c) for (t, k, c) in obs if k in ok]
+
+
+def _quarantine_zeros(
+    reads: list[tuple[float, int, float]],
+) -> list[tuple[float, int, float]]:
+    """'가짜 0(=화면의 8 오독)' 격리 (상단 0-격리 주석 참고). 전체 판독 1패스.
+
+    0 관측이 가짜인 조건: (±_ZERO_QUAR_LOOKAHEAD 내) 직전 양수 K가 있고,
+    직후 첫 양수 K가 그 이상(리셋 없이 이어짐). 진짜 리셋(하프타임/리조인)은
+    이후 K가 반드시 더 작게 재시작(0→1→2…)하므로 보존된다.
+    """
+    n = len(reads)
+    out: list[tuple[float, int, float]] = []
+    for i, (t, k, c) in enumerate(reads):
+        if k != 0:
+            out.append((t, k, c))
+            continue
+        prev_nz = None
+        for j in range(i - 1, -1, -1):
+            t2, k2, _c2 = reads[j]
+            if t - t2 > _ZERO_QUAR_LOOKAHEAD:
+                break
+            if k2 > 0:
+                prev_nz = k2
+                break
+        if prev_nz is None:
+            out.append((t, k, c))  # 앞선 양수 K 없음 — 매치 초반/리셋 직후의 진짜 0
+            continue
+        next_nz = None
+        for j in range(i + 1, n):
+            t2, k2, _c2 = reads[j]
+            if t2 - t > _ZERO_QUAR_LOOKAHEAD:
+                break
+            if k2 > 0:
+                next_nz = k2
+                break
+        if next_nz is not None and next_nz >= prev_nz:
+            continue  # K가 리셋 없이 이어짐 → 이 0은 가짜(8 오독) — 격리
+        out.append((t, k, c))
+    return out
 
 
 def _d_anomaly_t(d_obs: list[tuple[float, int, float]]) -> float | None:
@@ -182,6 +239,7 @@ def settle_rounds(
         prev = sp
 
     ok_reads = [(t, k, c) for (t, k, c) in reads if k is not None]
+    clean_reads = _quarantine_zeros(ok_reads)  # 가짜 0(8 오독) 격리 — 상단 주석
 
     rounds: list[SettledRound] = []
     carry_k: int | None = None
@@ -189,8 +247,11 @@ def settle_rounds(
 
     for idx, (s, e) in enumerate(segs):
         r = SettledRound(index=idx, start_sec=s, end_sec=e)
-        obs = [(t, k, c) for (t, k, c) in ok_reads if s <= t < e]
-        r.k_samples = len(obs)
+        obs = [(t, k, c) for (t, k, c) in clean_reads if s <= t < e]
+        # k_samples는 정의상 "필터 전 원시 기준"(G5 지표) — 격리 전 개수로 센다.
+        # 격리 후 개수로 세면 G5(>=10) 임계가 기존 캘리브와 어긋남 (실측: 00-40-56
+        # R83 65:01 TP가 k_samples 10→9로 떨어져 G5에 기각되는 회귀).
+        r.k_samples = sum(1 for (t, _k, _c) in ok_reads if s <= t < e)
         # ⚠ 시도했으나 순손실로 되돌림 (2026-07-07 Sonnet R3):
         # "carry_k 확립 시 0<obs_k<carry_k 관측은 항상 오독"이라는 강한 불변식을
         # 걸어봤으나(02-21-23 80:37 등 폭0 FP 다수 제거에는 성공) 02-21-23 64:54-65:20·
@@ -237,6 +298,21 @@ def settle_rounds(
                 if prev_r.k_end is not None:
                     prev_r.k_end = 8
                 r.k_base = 8
+            # 약한 판독 gap 상한 (상단 _GAP_WEAK_CAP 주석 참고) — 지지 미달로
+            # 걸러진 중간값 판독이 carry~첫관측 사이에 있으면 k_base를 끌어올림.
+            # 킬 수를 줄이는 방향으로만 작동(폭0 거짓 올킬 방지), 늘리진 못함.
+            if (
+                _GAP_WEAK_CAP
+                and r.k_base is not None
+                and r.k_start - r.k_base > 1
+                and carry_k is not None
+            ):
+                weak = [
+                    v for (t, v, _c) in ok_reads
+                    if carry_t < t < first_t and r.k_base < v < r.k_start
+                ]
+                if weak:
+                    r.k_base = max(weak)
             gap = r.k_start - r.k_base
             if gap > 0:
                 # 경계 그레이스: 경계 직후 곧바로 +1/+2 상태로 관측되면 그 킬은
@@ -253,7 +329,11 @@ def settle_rounds(
                         prev_r.k_end = max(prev_r.k_end, r.k_start)
                     r.k_base = r.k_start
                 else:
-                    r.kill_times = [first_t] * gap + r.kill_times
+                    # gap 킬 시각 = 라운드 시작(s) — 킬은 첫 관측(first_t) 시점이
+                    # 아니라 그 이전(직전 경계 부근)에 일어난 것. first_t로 찍으면
+                    # 판독 공백이 길 때 GT 창과 어긋남 (실측: 04-24 00-43-29 5:50
+                    # GT vs 6:17 첫관측 — 15s 허용오차 밖으로 밀려 미탐).
+                    r.kill_times = [s] * gap + r.kill_times
             # D-채널 가드 (2026-07-09): 라운드 내 사망/관전 이상 시각 이후 킬 무효화.
             # 사용자 오탐 검수 실측 — 죽으면 팀원 관전 화면의 K/D가 본인 것으로 오독됨.
             if d_reads and r.kill_times:
@@ -410,7 +490,36 @@ def _selftest() -> None:
     assert rs[0].kills == 3 and rs[0].k_end == 8, f"case10 prev: {rs[0]}"
     assert rs[1].kills == 1 and rs[1].k_base == 8, f"case10 cur: {rs[1]}"
 
-    print("hud_round_settle selftest: 10/10 OK")
+    # ⑪ 0-격리 — 8 오독 유래 고신뢰 0 지속(05-23 45:58 실측 유형): 7 안정 →
+    #    '0' 여러 번(진짜 K=8) → 세그먼트 끝. 다음 세그먼트 10 → 리셋 오염 없이
+    #    carry 7 유지 + gap 3 킬 (진짜 리셋이었다면 다음 K가 7보다 작아야 함)
+    reads11 = _fx(
+        (10.0, 7, 0.9, 8, 1.0),
+        (20.0, 0, 0.75, 7, 0.25),          # 가짜 0 (8 오독) — 격리돼야 함
+        (40.0, 10, 0.8, 6, 1.0),           # 다음 세그먼트, K 이어짐 (경계+10s 밖)
+    )
+    rs = settle_rounds(reads11, [28.0], 60.0)
+    assert not rs[0].reset and rs[0].k_end == 7, f"case11 seg0: {rs[0]}"
+    assert rs[1].kills == 3 and rs[1].k_base == 7, f"case11 seg1: {rs[1]}"
+    # gap 킬 시각 = 라운드 시작(첫 관측 아님)
+    assert rs[1].kill_times == [28.0] * 3, f"case11 kill_times: {rs[1].kill_times}"
+
+    # ⑤' 진짜 하프타임은 격리되지 않아야 (case5와 동일 판독 재확인 — 0 이후 저값 재시작)
+    rs = settle_rounds(reads5, [], 60.0)
+    assert rs[0].reset, f"case5-requar: {rs[0]}"
+
+    # ⑫ 약한 판독 gap 상한 — carry 4에서 다음 라운드 7 시작(gap 3 = 거짓 올킬
+    #    후보)이지만, 사이에 지지 미달 '6'(단발 conf 0.67)이 있으면 gap=1로 정정
+    #    (05-31 21-57-14 101:47 실측 유형)
+    reads12 = _fx(
+        (10.0, 4, 0.9, 8, 1.0),
+        (25.0, 6, 0.67, 1, 1.0),           # 약한 6 — 지지 필터엔 걸러지나 gap 상한엔 사용
+        (45.0, 7, 0.9, 8, 1.0),            # 다음 세그먼트 (경계+15s, 그레이스 밖)
+    )
+    rs = settle_rounds(reads12, [30.0], 60.0)
+    assert rs[1].k_base == 6 and rs[1].kills == 1, f"case12: {rs[1]}"
+
+    print("hud_round_settle selftest: 13/13 OK")
 
 
 if __name__ == "__main__":

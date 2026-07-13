@@ -23,6 +23,10 @@
 - **하위 AI 작업 명세**: [`SONNET_TASK.md`](SONNET_TASK.md) R5 절 (덤프 진단→재캐시→재스캔→게이트)
 - **클립 폴더**: `E:\clipai_result\ace_clips_hud\` 평탄화(`<날짜>_하이라이트(n).mp4`),
   오탐 `_오탐\`, 미탐 검수용 `_miss_review\`(43건)
+- **사용자 육안 검수 원본 데이터** — ⚠ 이미 완료·기록됨, 다시 요청하지 말 것:
+  - 오탐 16건 K/D 흐름 답변 → `files/_reorg_highlights.py`의 `FP_SET` 주석
+  - 미탐 43건 K/D 흐름 답변 + 판정 → [`MISS_FEEDBACK_FORM.md`](MISS_FEEDBACK_FORM.md)
+    (12건 복구/1건 GT제거/30건 아직미탐, 클립별로 전부 기록됨)
 - **다음 (남은 숙제)**:
   1. **E:\OBS 재처리 미완** — R5 수정 이전 stale JSON **75개** 재스캔 중단 상태
      (todo 리스트: `files/_obs_reprocess_todo.txt`). `--redo`로 이어서 돌리면 됨.

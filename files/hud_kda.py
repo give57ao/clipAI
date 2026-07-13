@@ -18,10 +18,13 @@ from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher, normalize_glyph, red_mask
 from scoreboard_layout import _ocr_mask_digit, get_reader
 
-_TOP_Y = (0.038, 0.092)
-_RED_WINS_X = (0.392, 0.448)
-_MID_ROUND_X = (0.448, 0.504)
-_BLUE_WINS_X = (0.504, 0.560)
+# 2026-07-13 재보정: 기존 값은 구 16:9 캘리브 영상 기준으로 어긋나 있어 실제로는
+# 숫자 박스가 아니라 그 아래 팀 인원 아이콘 줄을 잡고 있었음(OBS 4:3 game crop
+# 실측으로 재측정, 판정 대상 = 상단 라이브 HUD 팀별 라운드 승수 박스).
+_TOP_Y = (0.0, 0.036)
+_RED_WINS_X = (0.382, 0.458)
+_MID_ROUND_X = (0.462, 0.538)
+_BLUE_WINS_X = (0.542, 0.618)
 
 _KDA_LINE_Y = (0.235, 0.305)
 _KDA_LINE_X = (0.055, 0.220)

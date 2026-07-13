@@ -54,6 +54,18 @@ def load_boundary_verdicts(stem: str, cache_dir: Path) -> list[list] | None:
     return json.loads(p.read_text(encoding="utf-8")).get("runs", [])
 
 
+def load_score_win_events(stem: str) -> list[dict] | None:
+    """R6(2026-07-13) 상단 스코어 이벤트. score_cache 없으면 None(게이트 비활성)."""
+    from dataclasses import asdict
+
+    from hud_score_wins import load_score_timeline, score_events
+
+    tl = load_score_timeline(stem)
+    if tl is None:
+        return None
+    return [asdict(e) for e in score_events(tl)]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="신호 캐시 → 판정 재계산")
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
@@ -82,12 +94,14 @@ def main() -> int:
             continue
         reads, duration, scan_fps, stem = load_reads(cp)
         boundary_verdicts = load_boundary_verdicts(stem, cache_dir)
+        score_win_events = load_score_win_events(stem)
         tl = timeline_from_reads(
             reads,
             duration=duration,
             video_path=Path(rf"E:\OBS\{stem}.mp4"),
             scan_fps=scan_fps,
             boundary_verdicts=boundary_verdicts,
+            score_win_events=score_win_events,
         )
         (out_dir / f"{stem}.json").write_text(
             json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8"

@@ -68,6 +68,19 @@ _BRIDGE_8 = True
 # 0.67 단발)이 걸러져 carry(4)→7이 gap=3 거짓 올킬이 됨 — 6을 쓰면 gap=1로 정정.
 _GAP_WEAK_CAP = True
 
+# --- R7 (2026-07-14): 격리된 '가짜 0'(=화면의 8)을 carry 전진 증거로 재활용 ---
+# 사용자 육안 검수(폭0 오탐 9건 전부 = 원본 존재분)로 지배적 원인 확정:
+# 8은 EXCLUDE_DIGITS라 판독 불가 → 누적 K가 8을 지나면 시스템이 마지막 깨끗값 7에
+# 얼어붙고, 다음 깨끗값 10을 읽는 순간 carry(7)→k_start(10) gap=3 = 가짜 올킬.
+# 실측 3케이스 덤프 전부 동일 지문: 7(직전라운드, conf 0.9) → 가짜0=8(격리) → 10.
+# 그 8은 _quarantine_zeros가 이미 "가짜 0"으로 격리하는 바로 그 판독. blind gap
+# (carry_t~first_t)에 지지된 가짜-0이 있으면 k_base를 8로 전진 → 7→10(+3)이
+# 8→10(+2)로 정정돼 가짜 올킬 소멸. ⚠ gap-path 전용(k_start>k_base)이라 킬 수를
+# 줄이는 방향으로만 작동 — 정탐 폭0(7이 라운드 안에서 관측되는 within-chain 상승,
+# 03-12-36 R010 실측)은 gap=0이라 안 건드림 → 새 오탐 생성 원리적으로 불가.
+_EIGHT_EVID = True
+_EIGHT_EVID_MIN = 2          # blind gap 내 가짜-0(=8) 최소 지지 관측 수
+
 # --- D(데스) 채널 가드 (2026-07-09, 사용자 오탐 12건 검수 기반) ---
 # 도메인: 본인 D는 라운드 내 사망(+1) 외엔 변할 수 없다. 라운드 중 지지된 D 변화
 # = 사망(상승) 또는 관전 화면 오독(임의 변화, 죽으면 팀원 K/D가 패널에 노출됨 —
@@ -313,6 +326,22 @@ def settle_rounds(
                 ]
                 if weak:
                     r.k_base = max(weak)
+            # R7: 격리된 가짜-0(=8) 증거로 k_base 전진 (상단 _EIGHT_EVID 주석 참고).
+            # blind gap의 raw 0은 quarantine 규칙상(직전 양수7 · 직후 양수10≥7) 전부
+            # 가짜-0=8이므로, 지지되면 k_base를 8로 올려 gap +3 가짜 올킬을 +2로 정정.
+            if (
+                _EIGHT_EVID
+                and r.k_base is not None
+                and r.k_base < 8 < r.k_start
+                and r.k_start - r.k_base > 1
+                and carry_k is not None
+            ):
+                gap_zeros = [
+                    t for (t, v, _c) in ok_reads
+                    if carry_t < t < first_t and v == 0
+                ]
+                if len(gap_zeros) >= _EIGHT_EVID_MIN:
+                    r.k_base = 8
             gap = r.k_start - r.k_base
             if gap > 0:
                 # 경계 그레이스: 경계 직후 곧바로 +1/+2 상태로 관측되면 그 킬은
@@ -493,16 +522,18 @@ def _selftest() -> None:
     # ⑪ 0-격리 — 8 오독 유래 고신뢰 0 지속(05-23 45:58 실측 유형): 7 안정 →
     #    '0' 여러 번(진짜 K=8) → 세그먼트 끝. 다음 세그먼트 10 → 리셋 오염 없이
     #    carry 7 유지 + gap 3 킬 (진짜 리셋이었다면 다음 K가 7보다 작아야 함)
+    #    ★ R7(2026-07-14) 갱신: 이 판독의 '0'은 주석대로 "진짜 K=8" — 따라서 seg1은
+    #    8→10=2킬이 정답이지, 7→10=3킬(가짜 올킬)이 아니다. 기존 테스트가 FP 패턴을
+    #    '정답 3킬'로 잘못 인코딩하고 있었음(사용자 폭0 오탐 검수로 확정). R7이 정정.
     reads11 = _fx(
         (10.0, 7, 0.9, 8, 1.0),
-        (20.0, 0, 0.75, 7, 0.25),          # 가짜 0 (8 오독) — 격리돼야 함
+        (20.0, 0, 0.75, 7, 0.25),          # 가짜 0 (=8) — 격리 + R7 carry 전진 증거
         (40.0, 10, 0.8, 6, 1.0),           # 다음 세그먼트, K 이어짐 (경계+10s 밖)
     )
     rs = settle_rounds(reads11, [28.0], 60.0)
     assert not rs[0].reset and rs[0].k_end == 7, f"case11 seg0: {rs[0]}"
-    assert rs[1].kills == 3 and rs[1].k_base == 7, f"case11 seg1: {rs[1]}"
-    # gap 킬 시각 = 라운드 시작(첫 관측 아님)
-    assert rs[1].kill_times == [28.0] * 3, f"case11 kill_times: {rs[1].kill_times}"
+    assert rs[1].kills == 2 and rs[1].k_base == 8, f"case11 seg1: {rs[1]}"
+    assert rs[1].kill_times == [28.0] * 2, f"case11 kill_times: {rs[1].kill_times}"
 
     # ⑤' 진짜 하프타임은 격리되지 않아야 (case5와 동일 판독 재확인 — 0 이후 저값 재시작)
     rs = settle_rounds(reads5, [], 60.0)
@@ -519,7 +550,28 @@ def _selftest() -> None:
     rs = settle_rounds(reads12, [30.0], 60.0)
     assert rs[1].k_base == 6 and rs[1].kills == 1, f"case12: {rs[1]}"
 
-    print("hud_round_settle selftest: 13/13 OK")
+    # ⑬ R7 8-증거 carry 전진 — FP: 7(직전라운드) → 가짜0=8(blind gap) → 10(이 라운드).
+    #    실측 3케이스(00-07-24 R055, 22-50-54 R096, 01-14-15 R040) 동일 지문.
+    #    7→10(+3 가짜 올킬)이 8→10(+2)로 정정돼야 함.
+    reads13 = _fx(
+        (10.0, 7, 0.9, 8, 1.0),            # 직전 라운드 깨끗한 7
+        (23.0, 0, 0.75, 4, 1.0),           # blind gap: 가짜0=8 지지 4회 (경계 전후 걸침)
+        (45.0, 10, 0.8, 8, 1.0),           # 이 라운드: 10만 관측 (경계+15s, 그레이스 밖)
+    )
+    rs = settle_rounds(reads13, [30.0], 60.0)
+    assert rs[1].k_base == 8 and rs[1].kills == 2, f"case13 FP정정: {rs[1]}"
+
+    # ⑬' 정탐 미영향 — within-chain 7→10(진짜 올킬, 7이 라운드 안에서 관측).
+    #    03-12-36 R010 유형: 7·(가짜0=8)·10 모두 같은 라운드 → gap=0이라 R7 미발동.
+    reads13b = _fx(
+        (10.0, 7, 0.9, 8, 1.0),            # 같은 라운드 안: 7
+        (25.0, 0, 0.75, 5, 1.0),           # 같은 라운드 안: 가짜0=8 (격리됨)
+        (40.0, 10, 0.9, 8, 1.0),           # 같은 라운드 안: 10 (경계 없음)
+    )
+    rs = settle_rounds(reads13b, [], 60.0)
+    assert rs[0].kills == 3 and rs[0].k_start == 7, f"case13b 정탐유지: {rs[0]}"
+
+    print("hud_round_settle selftest: 15/15 OK")
 
 
 if __name__ == "__main__":

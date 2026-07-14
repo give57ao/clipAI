@@ -74,6 +74,69 @@ def red_mask(crop_bgr: np.ndarray) -> np.ndarray:
     return cv2.bitwise_or(m1, m2)
 
 
+# --- R8 (2026-07-14): 8 위상(topology) 프로브 — "구멍 2개"로 8을 직접 포착 ---
+# 8은 EXCLUDE_DIGITS(IoU 템플릿 제외)라 지금껏 판독 불가였고, 화면의 8은 상습적으로
+# '가짜 0'(conf 0.7~0.95)으로 오독돼 왔다(수많은 폭0 FP·미탐의 근원). 과거 두 실패
+# (IoU 템플릿 부활→마진 역전으로 0/6/9 동반 파괴, CNN 폴백→흐릿한 0을 고신뢰 8로
+# 오분류) 는 둘 다 "모양 전체의 닮음"에 의존한 접근이었다. 이번엔 위상 불변량:
+# **8=구멍 2개, 0/6/9=1개, 7=0개** — 모양이 뭉개져도 0이 위조할 수 없는 구조.
+# 단일 HSV 이진화(red_mask)가 8의 가운데 획을 뭉개는 게 오독의 기전이므로,
+# 원본 색상에서 redness(R-max(G,B)) 맵을 만들어 **임계값 7단계를 훑으며** 구멍
+# 수를 센다 — 8의 두 구멍이 살아나는 임계값 구간이 실측상 거의 항상 존재.
+#
+# 실측 검증 (2026-07-14, 사용자 육안확인 구간 337글리프, scratchpad probe8):
+#   판독기가 '0'이라 한 글리프 중 — 진짜 8: 98%(64/65)가 구멍2 / 진짜 0: 0%(0/18)
+#   대조군 — 7: 구멍0 100%, 9·10: 구멍2 오발 3%(2/69, 단발이라 지지필터가 흡수)
+# 채택 규칙: max구멍==2 일 때만 8 (3개 이상은 노이즈로 보고 불채택).
+_EIGHT_PROBE_THRS = (25, 40, 55, 70, 85, 100, 120)
+_EIGHT_PROBE_CONF = 0.80  # 지지필터 단발예외(0.88) 미만 — 반드시 2회 이상 관측돼야 채택됨
+
+
+def _count_holes(binimg: np.ndarray) -> int:
+    """최대 전경 CC 내부의 '갇힌 배경 구멍' 수 (테두리 접촉 배경 제외). 전경 없으면 -1."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binimg, connectivity=8)
+    if n < 2:
+        return -1
+    big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    x = stats[big, cv2.CC_STAT_LEFT]
+    y = stats[big, cv2.CC_STAT_TOP]
+    w = stats[big, cv2.CC_STAT_WIDTH]
+    h = stats[big, cv2.CC_STAT_HEIGHT]
+    sub = (labels[y : y + h, x : x + w] == big).astype(np.uint8)
+    inv = (1 - sub).astype(np.uint8)
+    ni, _li, si, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    holes = 0
+    for i in range(1, ni):
+        bx, by, bw, bh, area = si[i]
+        if area < 2:
+            continue
+        if bx == 0 or by == 0 or bx + bw == w or by + bh == h:
+            continue
+        holes += 1
+    return holes
+
+
+def probe_eight_topology(raw_bgr_patch: np.ndarray | None) -> bool:
+    """원본 BGR 글리프 패치가 '8'인지 위상으로 판정 (상단 R8 주석 참고).
+
+    IoU가 0 또는 None을 반환한 K 글리프에만 호출할 것 — 확신 있는 다른 숫자
+    판독을 뒤집는 용도가 아니다.
+    """
+    if raw_bgr_patch is None or raw_bgr_patch.size == 0 or raw_bgr_patch.ndim != 3:
+        return False
+    r = raw_bgr_patch[:, :, 2].astype(np.int16)
+    g = raw_bgr_patch[:, :, 1].astype(np.int16)
+    b = raw_bgr_patch[:, :, 0].astype(np.int16)
+    red = np.clip(r - np.maximum(g, b), 0, 255).astype(np.uint8)
+    max_holes = -1
+    for thr in _EIGHT_PROBE_THRS:
+        binimg = (red >= thr).astype(np.uint8) * 255
+        h = _count_holes(binimg)
+        if h > max_holes:
+            max_holes = h
+    return max_holes == 2
+
+
 def white_mask(crop_bgr: np.ndarray, thresh: int = 155) -> np.ndarray:
     up = cv2.resize(crop_bgr, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)

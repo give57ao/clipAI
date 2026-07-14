@@ -1052,3 +1052,57 @@ def find_score_anchor(video_path, n_samples=9) -> ScoreAnchor | None:
 
 - `HUD_ACE_HANDOFF.md`에 R6 결과 절 추가 (수치·표·기각이면 반증)
 - `HANDOFF.md` 요약 갱신, 커밋 (한국어 커밋 메시지, 시각 M:SS)
+
+---
+
+# R9 (2026-07-14): 신호 조합 검증기 — ace 후보 신뢰도 점수 (Fable 설계, Sonnet 구현)
+
+> 사용자 승인 완료. 목적: 탐지된 ace 후보마다 P(진짜) 점수를 매겨 **검수 우선순위
+> 정렬 + 저신뢰 플래깅**. ⚠ 절대 역할 한계: **자동 기각 금지** — ace 판정 자체는
+> 불변, 점수는 정렬/표시용만. (근거: 단독 임계값으로 기각된 신호들도 조합·확률화는
+> 별개 문제라는 판단 + 8-CNN 과신 실패 전례상 "판사"가 아니라 "도우미"로만.)
+
+## 파일: `files/_ace_verifier.py` (단일 파일, CLI)
+
+### 라벨 구축 (학습 데이터)
+- `_compare_hud_gt.GT` 딕셔너리에 있는 영상들의 hud_timeline JSON에서 ace 라운드 수집.
+- `_compare_hud_gt._overlaps`(tol=15.0)와 동일한 매칭으로 GT와 대조 → 매칭=TP(1),
+  비매칭=FP(0). GT 딕셔너리에 **없는** 영상의 후보는 라벨 없음 → 추론(triage) 대상.
+- 예상 규모: TP ~66+, FP ~19+ (재스캔 완료분 기준. 클래스 불균형은 class_weight로)
+
+### 피처 (라운드당, hud_timeline JSON만으로 계산 — 캐시 의존 금지)
+1. `width` = max(kill_times)-min(kill_times); `width0` = (width==0)
+2. `n_start_kills` = kill_times 중 start_sec와 동일한 개수 (gap-귀속 킬 수)
+3. `first_kill_off` = first_kill_sec - start_sec (None이면 -1)
+4. `ace_off_end` = end_sec - ace_sec (None이면 -1)
+5. `dur` = end_sec - start_sec; `k_density` = k_samples / max(dur,1)
+6. `k_samples`, `resets`
+7. `prev_kills`/`next_kills` = 인접 라운드 킬 수 (없으면 -1)
+8. `read_quality` = k_template_hits/(hits+miss+row_miss) (영상 수준)
+9. `round_pos` = round_index / 라운드 총수
+10. `kt_rel` = [(kt-start)/dur for kt] 의 평균 (킬들이 라운드 내 어디쯤인가)
+11. score_cache 있으면: 라운드 내 win 이벤트 수 (`hud_score_wins.load_score_timeline`
+    + `score_events`), 없으면 -1 (결측 지시자)
+
+### 모델·평가 (n≈100이므로 과적합 방어가 전부)
+- 후보 2종 비교: `LogisticRegression(class_weight='balanced')` (표준화 후) vs
+  `HistGradientBoostingClassifier(max_depth=2, ...)` — **leave-one-video-out CV**
+  (같은 영상의 라운드가 train/test에 갈리면 누수) 로 ROC-AUC/PR-AUC 비교, 우승자를
+  전체 데이터로 재학습.
+- 운영 지표 추가 보고: 점수 오름차순 정렬 시 **FP가 상위 K에 얼마나 몰리는가**
+  (K=10/20에서의 FP 개수) — 검수 큐 효율의 직접 지표.
+- 산출: `E:\clipai_result\ace_verifier.pkl` (모델+피처명+스케일러), 피처 중요도 출력.
+
+### CLI
+```
+python -u _ace_verifier.py --train    # 라벨 구축→CV 비교→최종 학습→저장, 지표 출력
+python -u _ace_verifier.py --score    # 전체 hud_timeline ace 후보 채점 →
+   E:\clipai_result\ace_verifier_scores.csv (stem, round, M:SS, label, score)
+   + 라벨 없는 후보를 점수 오름차순으로 출력 (= 사용자 검수 큐)
+```
+
+### 수용 기준·주의
+- LOVO ROC-AUC를 **있는 그대로 보고** (좋든 나쁘든 — 0.75 미만이면 "정렬용으로도
+  약함"이라고 정직하게 기록). TP 상실 개념 자체가 없음(판정 불변이므로 회귀 불가).
+- score_cache 없는 영상에서 크래시 금지 (결측 -1 처리 확인).
+- 시각 보고 M:SS. 파일 상단에 역할 한계(자동 기각 금지) 한국어 주석 필수.

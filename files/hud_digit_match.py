@@ -86,9 +86,24 @@ def red_mask(crop_bgr: np.ndarray) -> np.ndarray:
 #
 # 실측 검증 (2026-07-14, 사용자 육안확인 구간 337글리프, scratchpad probe8):
 #   판독기가 '0'이라 한 글리프 중 — 진짜 8: 98%(64/65)가 구멍2 / 진짜 0: 0%(0/18)
-#   대조군 — 7: 구멍0 100%, 9·10: 구멍2 오발 3%(2/69, 단발이라 지지필터가 흡수)
-# 채택 규칙: max구멍==2 일 때만 8 (3개 이상은 노이즈로 보고 불채택).
+#   대조군 — 7: 구멍0 100%, 9·10: 구멍2 오발 3%(2/69)
+#
+# ⚠ R8 1차 배포(max구멍==2 일 때만 8 채택) 실측 배포 후 회귀 발견 (2026-07-14):
+# 13개 영상 재스캔에서 새 폭0 FP 26건 발생 + TP 1건 상실(02-05-29 56:49/57:07).
+# 원인: "7개 임계값 중 단 1번이라도 구멍2가 나오면 채택"이 너무 느슨 — 그
+# TP파괴 사례를 실측하니 n_thr2(구멍2가 나온 임계값 개수)가 **1**뿐이었음
+# (thr=40 한 곳에서만 우연히 2, 나머지 6곳은 0~1). **n_thr2 분포 재분석**
+# (같은 337글리프, 이번엔 "몇 개 임계값에서 구멍2가 나왔는지" 집계):
+#   진짜 8(판독0)  n_thr2 분포 [0,0,0,1,17,30,17,0] — 전부 3개 이상
+#   대조군(0/6/7/9/10, 노이즈 포함) — 2개 이상은 **0건**, 최대 1개
+# → 진짜 8은 임계값 스윕 내내 안정적으로 구멍2가 유지되지만, 노이즈발
+# 스퓨리어스는 우연히 1번만 걸린다는 게 실측으로 확정. **n_thr2>=3**으로
+# 강화(대조군 완전 배제, 진짜 8 포착률 거의 그대로: "8/None" 32건 중
+# n_thr2>=3은 26건, n_thr2==2 는 1건뿐이라 임계값 3도 2도 회수율 차이는 미미
+# — 안전 마진 위해 3 채택). 재시도 시 반드시 위 실전 회귀(스퓨리어스 8 26건
+# +TP 1건 상실) 재현해 없는지 `_tp_diff --compare-to r7_final`로 먼저 확인할 것.
 _EIGHT_PROBE_THRS = (25, 40, 55, 70, 85, 100, 120)
+_EIGHT_PROBE_MIN_THR_HITS = 3  # 구멍2가 나온 임계값 최소 개수 (단일 우연 적중 배제)
 _EIGHT_PROBE_CONF = 0.80  # 지지필터 단발예외(0.88) 미만 — 반드시 2회 이상 관측돼야 채택됨
 
 
@@ -128,13 +143,12 @@ def probe_eight_topology(raw_bgr_patch: np.ndarray | None) -> bool:
     g = raw_bgr_patch[:, :, 1].astype(np.int16)
     b = raw_bgr_patch[:, :, 0].astype(np.int16)
     red = np.clip(r - np.maximum(g, b), 0, 255).astype(np.uint8)
-    max_holes = -1
+    n_thr2 = 0
     for thr in _EIGHT_PROBE_THRS:
         binimg = (red >= thr).astype(np.uint8) * 255
-        h = _count_holes(binimg)
-        if h > max_holes:
-            max_holes = h
-    return max_holes == 2
+        if _count_holes(binimg) == 2:
+            n_thr2 += 1
+    return n_thr2 >= _EIGHT_PROBE_MIN_THR_HITS
 
 
 def white_mask(crop_bgr: np.ndarray, thresh: int = 155) -> np.ndarray:

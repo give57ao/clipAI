@@ -2,3 +2,8 @@ torch>=2.0
 torchvision>=0.15
 opencv-python>=4.8
 numpy>=1.24
+easyocr>=1.7   # hud_kda.py의 K자릿수 폴백 판독(scoreboard_layout.get_reader 경유) — 현행 파이프라인 필수
+
+# legacy: 진단 도구 전용, 현행 HUD 스캔/배치 경로에는 불필요
+# - scikit-learn (files/_ace_verifier.py 에서만 사용)
+# scikit-learn>=1.3

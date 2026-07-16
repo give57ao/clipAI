@@ -111,6 +111,9 @@ def verify_runs_live(
 
     R5(2026-07-09): scan_hud_aces·verify_video 공용 코어. 반환은
     timeline_from_reads(boundary_verdicts=...)가 바로 소비하는 형식.
+
+    fail-open 계약(2026-07-16): 기각(False)은 프레임 3장이 전부 판독됐을 때만 —
+    read 실패가 섞이면 무조건 True(경계 유지). 상세는 아래 루프 내 주석.
     """
     runs = rowmiss_runs(reads)
     if not runs:
@@ -126,15 +129,31 @@ def verify_runs_live(
             verdicts.append([start, last, True])
             continue
         best = 0.0
+        n_ok = 0
         for frac in (0.25, 0.5, 0.75):
             t = start + (last - start) * frac
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
-            ok, frame = cap.read()
-            if not ok or frame is None:
+            frame = None
+            for _attempt in (0, 1):  # 일시적 I/O 지연은 재시도 1회로 흡수
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    break
+                frame = None
+            if frame is None:
                 continue
+            n_ok += 1
             prob = classify_frame(frame, model, transform, device)
             best = max(best, prob)
-        verdicts.append([start, last, best >= SCORE_THRESHOLD])
+        # ★ fail-open (2026-07-16 실측 버그 수정): 기각(False)은 3장 전부 판독됐을 때만.
+        # 종전엔 read 실패를 "스코어보드 없음"과 동일 취급(best=0.0 유지)해, 디스크
+        # I/O 타임아웃이 나면 진짜 경계가 조용히 폐기됐음 — 6중 병렬 재스캔에서 영상당
+        # 경계 14~39개가 증발해 라운드가 수십 분 단위로 병합, TP 올킬 소실(01-26-52
+        # 실측: 단일 프로세스 감사 99후보/82진짜 vs 병렬 재스캔 50경계). 기각은 라운드를
+        # 파괴하는 비가역 결정이므로 증거가 온전할 때만 허용하고, 증거 부족 시 경계
+        # 유지(R5 이전의 안전한 동작) — _lookup_boundary_verdict의 "결과 없으면 유지"
+        # 원칙과 동일 방향.
+        is_boundary = True if n_ok < 3 else (best >= SCORE_THRESHOLD)
+        verdicts.append([start, last, is_boundary])
     cap.release()
     return verdicts
 

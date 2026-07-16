@@ -100,6 +100,11 @@ python -u batch_hud_ace_pipeline.py --only "2026-04-14 00-32-52"  # 37번부터
 
 ## 3. 수동 정답 (육안 라벨, 10개 영상)
 
+> **원본은 `files/gt_aces.json`** (2026-07-17 이관) — 아래 표는 사람이 보기 위한 스냅샷이며
+> 갱신되지 않을 수 있음. recall/precision 측정·GT 수정은 `files/_compare_hud_gt.py`가 읽는
+> `files/gt_aces.json`을 기준으로 한다. (과거 이 표와 코드 하드코딩 GT가 따로 놀며 GT 충돌
+> 사고가 있었음 — IMPROVEMENT_REPORT.md §B-1.)
+
 시각은 **M:SS** (또는 H:MM:SS). 구간은 올킬 플레이 구간(클립 후보).
 
 | # | 영상 | 정답 올킬 구간 | GT 건수 |

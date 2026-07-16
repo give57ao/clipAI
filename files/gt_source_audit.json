@@ -1,0 +1,432 @@
+{
+ "generated": "gt_source_audit",
+ "rows": [
+  {
+   "stem": "2026-01-08 02-33-22",
+   "gt_spans": 2,
+   "source": "D:\\2026-01-08 02-33-22.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-19 23-00-50",
+   "gt_spans": 1,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-19 23-13-48",
+   "gt_spans": 0,
+   "source": null,
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-21 00-40-56",
+   "gt_spans": 4,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-21 02-21-23",
+   "gt_spans": 3,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-22 00-44-50",
+   "gt_spans": 2,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-22 02-03-10",
+   "gt_spans": 5,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-22 03-02-03",
+   "gt_spans": 2,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-22 23-51-52",
+   "gt_spans": 2,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-24 00-42-33",
+   "gt_spans": 3,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-24 02-34-09",
+   "gt_spans": 4,
+   "source": null,
+   "sig_cache": true,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-26 01-26-52",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-03-26 01-26-52.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-29 01-01-04",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-03-29 01-01-04.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-29 01-58-34",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-03-29 01-58-34.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-29 02-43-33",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-03-29 02-43-33.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-29 03-12-36",
+   "gt_spans": 4,
+   "source": "E:\\OBS\\2026-03-29 03-12-36.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-29 23-58-38",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-03-29 23-58-38.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-30 02-14-48",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-03-30 02-14-48.mp4",
+   "sig_cache": false,
+   "hud_timeline": false
+  },
+  {
+   "stem": "2026-03-30 02-19-18",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-03-30 02-19-18.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-03-30 02-55-36",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-03-30 02-55-36.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-08 00-04-12",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-08 00-04-12.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-08 00-34-40",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-08 00-34-40.mp4",
+   "sig_cache": false,
+   "hud_timeline": false
+  },
+  {
+   "stem": "2026-04-08 00-36-50",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-08 00-36-50.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-08 01-32-42",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-08 01-32-42.mp4",
+   "sig_cache": false,
+   "hud_timeline": false
+  },
+  {
+   "stem": "2026-04-08 02-15-28",
+   "gt_spans": 5,
+   "source": "E:\\OBS\\2026-04-08 02-15-28.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-08 03-23-57",
+   "gt_spans": 4,
+   "source": "E:\\OBS\\2026-04-08 03-23-57.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-09 02-05-29",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-04-09 02-05-29.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-10 00-08-17",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-04-10 00-08-17.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-10 00-50-04",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-10 00-50-04.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-13 22-46-39",
+   "gt_spans": 5,
+   "source": "E:\\OBS\\2026-04-13 22-46-39.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-13 23-53-06",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-13 23-53-06.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-14 00-32-52",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-14 00-32-52.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-23 23-41-07",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-23 23-41-07.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-24 00-43-29",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-24 00-43-29.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-26 00-28-24",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-26 00-28-24.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-26 01-29-40",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-04-26 01-29-40.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-27 22-50-54",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-04-27 22-50-54.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-28 00-07-24",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-28 00-07-24.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-28 23-17-41",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-28 23-17-41.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-29 00-02-08",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-04-29 00-02-08.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-04-29 01-14-15",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-04-29 01-14-15.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-07 00-51-01",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-05-07 00-51-01.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-07 01-19-26",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-05-07 01-19-26.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-12 00-23-40",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-05-12 00-23-40.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-15 01-41-42",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-05-15 01-41-42.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-15 02-52-27",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-05-15 02-52-27.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-16 01-44-01",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-05-16 01-44-01.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-17 21-47-39",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-17 21-47-39.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-18 01-54-57",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-18 01-54-57.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-19 01-36-22",
+   "gt_spans": 4,
+   "source": "E:\\OBS\\2026-05-19 01-36-22.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-23 01-50-15",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-23 01-50-15.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-23 02-14-52",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-23 02-14-52.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-23 02-48-06",
+   "gt_spans": 3,
+   "source": "E:\\OBS\\2026-05-23 02-48-06.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-25 02-06-09",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-25 02-06-09.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-26 23-45-51",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-05-26 23-45-51.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-27 00-28-13",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-05-27 00-28-13.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-31 02-37-59",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-05-31 02-37-59.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-31 03-26-16",
+   "gt_spans": 1,
+   "source": "E:\\OBS\\2026-05-31 03-26-16.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-05-31 21-57-14",
+   "gt_spans": 4,
+   "source": "E:\\OBS\\2026-05-31 21-57-14.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-06-01 00-26-52",
+   "gt_spans": 2,
+   "source": "E:\\OBS\\2026-06-01 00-26-52.mp4",
+   "sig_cache": false,
+   "hud_timeline": true
+  },
+  {
+   "stem": "2026-06-01 23-46-27",
+   "gt_spans": 0,
+   "source": "E:\\OBS\\2026-06-01 23-46-27.mp4",
+   "sig_cache": false,
+   "hud_timeline": false
+  }
+ ]
+}

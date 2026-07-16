@@ -113,4 +113,7 @@
 | `files/hud_cache_io.py` | **완성** — 확장 캐시 I/O, 왕복+하위호환 검증 통과 |
 | `files/_gt_source_audit.py` | **완성** — GT 자산 감사, 실행 검증 완료 |
 | `files/gt_source_audit.json` | 감사 스냅샷 (61영상: 소실 10 / OBS 50 / D: 1) |
-| T1~T7 | 미착수 — 이 문서가 명세 |
+| `files/gt_aces.json` | **완성**(T2 산출물) — GT 61영상/107구간 + source_available |
+| T1 (requirements) | **완료** (`9094d60`) — easyocr 추가, 전수조사로 발견 |
+| T2 (GT 이관) | **완료** (`a95cb1e`) — recall/precision 이관 전후 완전 동일 검증 |
+| T3~T7 | 미착수 — 이 문서가 명세 |

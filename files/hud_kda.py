@@ -18,10 +18,13 @@ from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher, normalize_glyph, red_mask
 from scoreboard_layout import _ocr_mask_digit, get_reader
 
-_TOP_Y = (0.038, 0.092)
-_RED_WINS_X = (0.392, 0.448)
-_MID_ROUND_X = (0.448, 0.504)
-_BLUE_WINS_X = (0.504, 0.560)
+# 2026-07-13 재보정: 기존 값은 구 16:9 캘리브 영상 기준으로 어긋나 있어 실제로는
+# 숫자 박스가 아니라 그 아래 팀 인원 아이콘 줄을 잡고 있었음(OBS 4:3 game crop
+# 실측으로 재측정, 판정 대상 = 상단 라이브 HUD 팀별 라운드 승수 박스).
+_TOP_Y = (0.0, 0.036)
+_RED_WINS_X = (0.382, 0.458)
+_MID_ROUND_X = (0.462, 0.538)
+_BLUE_WINS_X = (0.542, 0.618)
 
 _KDA_LINE_Y = (0.235, 0.305)
 _KDA_LINE_X = (0.055, 0.220)
@@ -64,11 +67,17 @@ class HudSnapshot:
 
 @dataclass
 class KdaGlyphs:
-    """탐지된 K/D/A 글리프(이진 마스크 패치, 좌→우) — 값 판독 전 단계."""
+    """탐지된 K/D/A 글리프(이진 마스크 패치, 좌→우) — 값 판독 전 단계.
+
+    k_raw: K 글리프의 **원본 BGR 크롭**(패딩 2px) — R8 8-위상 프로브용
+    (`hud_digit_match.probe_eight_topology`). 이진 마스크는 8의 가운데 획을
+    뭉개므로 위상 판정은 원본 색상에서 해야 한다.
+    """
     k: list[np.ndarray] = field(default_factory=list)
     d: list[np.ndarray] = field(default_factory=list)
     a: list[np.ndarray] = field(default_factory=list)
     row_gy: float = 0.0  # game 비율 y (디버그)
+    k_raw: list[np.ndarray] = field(default_factory=list)
 
 
 def _glyph_slope(patch: np.ndarray) -> float:
@@ -133,26 +142,60 @@ def locate_kda_glyphs(game_bgr: np.ndarray) -> KdaGlyphs | None:
     groups = [best_row[:s1], best_row[s1 + 1 : s2], best_row[s2 + 1 :]]
     if any(not (1 <= len(g) <= _MAX_GROUP_DIGITS) for g in groups):
         return None
+    k_raw = []
+    for (bx, by, bw, bh, _p) in groups[0]:
+        pad = 2
+        rx1, ry1 = max(0, bx - pad), max(0, by - pad)
+        rx2 = min(band.shape[1], bx + bw + pad)
+        ry2 = min(band.shape[0], by + bh + pad)
+        k_raw.append(band[ry1:ry2, rx1:rx2].copy())
     return KdaGlyphs(
         k=[b[4] for b in groups[0]],
         d=[b[4] for b in groups[1]],
         a=[b[4] for b in groups[2]],
         row_gy=(y1 + best_row[0][1]) / gh,
+        k_raw=k_raw,
     )
 
 
 def _read_digit_group(
     patches: list[np.ndarray],
     matcher,
+    raw_patches: list[np.ndarray] | None = None,
 ) -> tuple[int | None, float]:
-    """글리프 마스크 리스트(좌→우) → 다자리 정수. 하나라도 미매칭이면 None."""
-    from hud_digit_match import match_glyph_iou
+    """글리프 마스크 리스트(좌→우) → 다자리 정수. 하나라도 미매칭이면 None.
+
+    raw_patches (R8, 2026-07-14): 원본 BGR 크롭 — 전달되면(K 슬롯) IoU가 0 또는
+    None을 반환한 자리에서 8-위상 프로브(`probe_eight_topology`)를 추가로 시도.
+    실측 근거·채택 규칙은 `hud_digit_match.py` R8 주석 참고. 확신 있는 다른 숫자
+    판독은 절대 뒤집지 않음(0/None만 프로브) — R4 CNN 실패의 재발 방지 원칙.
+
+    ⚠ R4(2026-07-07) CNN 폴백 실험 — 순손실로 되돌림(현재 비활성):
+    "IoU가 None이면 CNN에 물어 8만 채택"으로 통합했다가 recall 88.5%→80.8%
+    순손실 실측(TP 23→21). 원인: IoU가 None을 반환하는 건 흔한 정상 노이즈
+    프레임(모션블러 등)이지 "진짜 8" 신호가 아닌데, 그때 CNN이 **고신뢰(0.90~0.98)로
+    "0"을 "8"로 오분류**하는 경우가 많아 원래 안정적인 0 구간을 스퓨리어스 8로
+    오염시킴(00-40-56 24:04~24:12 실측 — 원래 전부 "0"이어야 할 자리에 8이 8회
+    끼어듦). 신뢰도 임계값을 올려도 해결 안 됨 — 오분류 자체가 고신뢰이기 때문
+    (모델이 "모른다"를 표현 못 함, 8 표본 36개가 여전히 협소).
+    54:20·79:51은 실제로 복원됐지만(사용자 확인 케이스), 다른 4곳(00-40-56 24:10,
+    02-21-23 64:54, 02-34-09 2:20·51:40)이 새로 깨져 순손실 — `_tp_diff` 확인 완료.
+    재시도하려면: (a) 단일 프레임이 아니라 연속 2프레임 이상 CNN이 8로 동의할 때만
+    채택(시간적 corroboration), (b) IoU가 실패하는 지점들을 모아 그 실제 정답
+    라벨(대개 0/6/9)을 하드네거티브로 재학습에 추가 — 8만 편식된 데이터셋 탈피.
+    `train_hud_digit_cnn.py`/`hud_digit_match.match_glyph_cnn`은 인프라로 보존.
+    """
+    from hud_digit_match import _EIGHT_PROBE_CONF, match_glyph_iou, probe_eight_topology
 
     digits: list[int] = []
     min_score = 1.0
-    for p in patches:
+    for gi, p in enumerate(patches):
         glyph = normalize_glyph(p)
         d, sc = match_glyph_iou(glyph, matcher.k_templates)
+        if raw_patches is not None and gi < len(raw_patches) and (d is None or d == 0):
+            # R8: '0' 또는 미판독 자리만 8-위상 프로브 (다른 확신 판독은 불변)
+            if probe_eight_topology(raw_patches[gi]):
+                d, sc = 8, _EIGHT_PROBE_CONF
         if d is None:
             return None, max(0.0, sc)
         digits.append(d)
@@ -239,7 +282,7 @@ def read_kda_triple_from_game(
     if glyphs is None:
         return None, None, None, 0.0, "row_miss"
     matcher = get_hud_digit_matcher()
-    k, kconf = _read_digit_group(glyphs.k, matcher)
+    k, kconf = _read_digit_group(glyphs.k, matcher, raw_patches=glyphs.k_raw)
     if k is not None and not (0 <= k <= _MAX_CUM_K):
         k, kconf = None, 0.0
     km = "template" if k is not None else "template_miss"

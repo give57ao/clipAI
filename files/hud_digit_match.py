@@ -17,12 +17,138 @@ _K_MATCH_MIN = 0.50
 _K_IOU_MIN = 0.55
 _K_IOU_MARGIN = 0.06   # 1등-2등 IoU 차이가 이보다 작으면 모호 → None (안전 미스)
 
+# --- R4 (2026-07-07): 숫자 CNN 판독 — IoU는 8을 0/6/9와 구분 못 해 EXCLUDE_DIGITS로
+# 뺐던 근본 한계를 학습 분류기로 해소(train_hud_digit_cnn.py, held-out val_acc 99.7%,
+# 실프레임 스팟체크로 8 고신뢰 판독 확인). IoU는 CNN 모델이 없을 때만 폴백.
+_CNN_MODEL_PATH = Path(r"E:\Highlights\ml_dataset\models\hud_digit_clf_best.pt")
+_CNN_MIN_P = 0.85
+_cnn_model = None
+_cnn_classes: list = []
+_cnn_device = None
+
+
+def _get_cnn():
+    global _cnn_model, _cnn_classes, _cnn_device
+    if _cnn_model is not None or not _CNN_MODEL_PATH.exists():
+        return _cnn_model
+    import json as _json
+
+    import torch as _torch
+
+    from train_hud_digit_cnn import TinyDigitCNN
+
+    meta_path = _CNN_MODEL_PATH.parent / "hud_digit_clf_meta.json"
+    meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+    _cnn_classes = [int(c) if c != "junk" else "junk" for c in meta["classes"]]
+    _cnn_device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+    model = TinyDigitCNN(num_classes=len(_cnn_classes)).to(_cnn_device)
+    model.load_state_dict(_torch.load(_CNN_MODEL_PATH, map_location=_cnn_device))
+    model.eval()
+    _cnn_model = model
+    return _cnn_model
+
+
+def match_glyph_cnn(glyph: np.ndarray | None) -> tuple[int | None, float]:
+    """CNN 분류 — junk 또는 최고확률 < `_CNN_MIN_P`면 None(판독실패, 안전 미스)."""
+    import torch as _torch
+
+    model = _get_cnn()
+    if model is None or glyph is None:
+        return None, 0.0
+    x = glyph.astype(np.float32) / 255.0
+    t = _torch.from_numpy(x).unsqueeze(0).unsqueeze(0).to(_cnn_device)
+    with _torch.no_grad():
+        p = _torch.softmax(model(t), dim=1)[0]
+    top_i = int(_torch.argmax(p).item())
+    top_p = float(p[top_i].item())
+    label = _cnn_classes[top_i]
+    if label == "junk" or top_p < _CNN_MIN_P:
+        return None, top_p
+    return label, top_p
+
 
 def red_mask(crop_bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
     m1 = cv2.inRange(hsv, (0, 90, 90), (10, 255, 255))
     m2 = cv2.inRange(hsv, (168, 90, 90), (180, 255, 255))
     return cv2.bitwise_or(m1, m2)
+
+
+# --- R8 (2026-07-14): 8 위상(topology) 프로브 — "구멍 2개"로 8을 직접 포착 ---
+# 8은 EXCLUDE_DIGITS(IoU 템플릿 제외)라 지금껏 판독 불가였고, 화면의 8은 상습적으로
+# '가짜 0'(conf 0.7~0.95)으로 오독돼 왔다(수많은 폭0 FP·미탐의 근원). 과거 두 실패
+# (IoU 템플릿 부활→마진 역전으로 0/6/9 동반 파괴, CNN 폴백→흐릿한 0을 고신뢰 8로
+# 오분류) 는 둘 다 "모양 전체의 닮음"에 의존한 접근이었다. 이번엔 위상 불변량:
+# **8=구멍 2개, 0/6/9=1개, 7=0개** — 모양이 뭉개져도 0이 위조할 수 없는 구조.
+# 단일 HSV 이진화(red_mask)가 8의 가운데 획을 뭉개는 게 오독의 기전이므로,
+# 원본 색상에서 redness(R-max(G,B)) 맵을 만들어 **임계값 7단계를 훑으며** 구멍
+# 수를 센다 — 8의 두 구멍이 살아나는 임계값 구간이 실측상 거의 항상 존재.
+#
+# 실측 검증 (2026-07-14, 사용자 육안확인 구간 337글리프, scratchpad probe8):
+#   판독기가 '0'이라 한 글리프 중 — 진짜 8: 98%(64/65)가 구멍2 / 진짜 0: 0%(0/18)
+#   대조군 — 7: 구멍0 100%, 9·10: 구멍2 오발 3%(2/69)
+#
+# ⚠ R8 1차 배포(max구멍==2 일 때만 8 채택) 실측 배포 후 회귀 발견 (2026-07-14):
+# 13개 영상 재스캔에서 새 폭0 FP 26건 발생 + TP 1건 상실(02-05-29 56:49/57:07).
+# 원인: "7개 임계값 중 단 1번이라도 구멍2가 나오면 채택"이 너무 느슨 — 그
+# TP파괴 사례를 실측하니 n_thr2(구멍2가 나온 임계값 개수)가 **1**뿐이었음
+# (thr=40 한 곳에서만 우연히 2, 나머지 6곳은 0~1). **n_thr2 분포 재분석**
+# (같은 337글리프, 이번엔 "몇 개 임계값에서 구멍2가 나왔는지" 집계):
+#   진짜 8(판독0)  n_thr2 분포 [0,0,0,1,17,30,17,0] — 전부 3개 이상
+#   대조군(0/6/7/9/10, 노이즈 포함) — 2개 이상은 **0건**, 최대 1개
+# → 진짜 8은 임계값 스윕 내내 안정적으로 구멍2가 유지되지만, 노이즈발
+# 스퓨리어스는 우연히 1번만 걸린다는 게 실측으로 확정. **n_thr2>=3**으로
+# 강화(대조군 완전 배제, 진짜 8 포착률 거의 그대로: "8/None" 32건 중
+# n_thr2>=3은 26건, n_thr2==2 는 1건뿐이라 임계값 3도 2도 회수율 차이는 미미
+# — 안전 마진 위해 3 채택). 재시도 시 반드시 위 실전 회귀(스퓨리어스 8 26건
+# +TP 1건 상실) 재현해 없는지 `_tp_diff --compare-to r7_final`로 먼저 확인할 것.
+_EIGHT_PROBE_THRS = (25, 40, 55, 70, 85, 100, 120)
+_EIGHT_PROBE_MIN_THR_HITS = 3  # 구멍2가 나온 임계값 최소 개수 (단일 우연 적중 배제)
+_EIGHT_PROBE_CONF = 0.80  # 지지필터 단발예외(0.88) 미만 — 반드시 2회 이상 관측돼야 채택됨
+
+
+def _count_holes(binimg: np.ndarray) -> int:
+    """최대 전경 CC 내부의 '갇힌 배경 구멍' 수 (테두리 접촉 배경 제외). 전경 없으면 -1."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binimg, connectivity=8)
+    if n < 2:
+        return -1
+    big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    x = stats[big, cv2.CC_STAT_LEFT]
+    y = stats[big, cv2.CC_STAT_TOP]
+    w = stats[big, cv2.CC_STAT_WIDTH]
+    h = stats[big, cv2.CC_STAT_HEIGHT]
+    sub = (labels[y : y + h, x : x + w] == big).astype(np.uint8)
+    inv = (1 - sub).astype(np.uint8)
+    ni, _li, si, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    holes = 0
+    for i in range(1, ni):
+        bx, by, bw, bh, area = si[i]
+        if area < 2:
+            continue
+        if bx == 0 or by == 0 or bx + bw == w or by + bh == h:
+            continue
+        holes += 1
+    return holes
+
+
+def probe_eight_topology(raw_bgr_patch: np.ndarray | None) -> bool:
+    """원본 BGR 글리프 패치가 '8'인지 위상으로 판정 (상단 R8 주석 참고).
+
+    IoU가 0 또는 None을 반환한 K 글리프에만 호출할 것 — 확신 있는 다른 숫자
+    판독을 뒤집는 용도가 아니다.
+    """
+    if raw_bgr_patch is None or raw_bgr_patch.size == 0 or raw_bgr_patch.ndim != 3:
+        return False
+    r = raw_bgr_patch[:, :, 2].astype(np.int16)
+    g = raw_bgr_patch[:, :, 1].astype(np.int16)
+    b = raw_bgr_patch[:, :, 0].astype(np.int16)
+    red = np.clip(r - np.maximum(g, b), 0, 255).astype(np.uint8)
+    n_thr2 = 0
+    for thr in _EIGHT_PROBE_THRS:
+        binimg = (red >= thr).astype(np.uint8) * 255
+        if _count_holes(binimg) == 2:
+            n_thr2 += 1
+    return n_thr2 >= _EIGHT_PROBE_MIN_THR_HITS
 
 
 def white_mask(crop_bgr: np.ndarray, thresh: int = 155) -> np.ndarray:
@@ -121,7 +247,14 @@ def match_glyph_iou(
     min_margin: float = _K_IOU_MARGIN,
 ) -> tuple[int | None, float]:
     """IoU + 마진 매칭: 1등이 min_score 이상이고 2등(다른 숫자)과 min_margin 이상
-    차이날 때만 채택. 모호하면 None — 상태머신이 미스로 안전 처리."""
+    차이날 때만 채택. 모호하면 None — 상태머신이 미스로 안전 처리.
+
+    ⚠ 8-거부권(0 매칭 시 _removed_8 템플릿과 재대조해 근접하면 None) 시도·철회
+    (2026-07-09 Fable): 프레임 검증으로 "화면의 8이 0으로 오독됨"은 확정했으나
+    (05-26 26:10, 실제 K/D/A 8/9/0 → K가 conf 0.7대 '0'), 글리프 IoU 마진으로는
+    분리 불가 실측 — 진짜 8의 (iou0−iou8) 마진 0.07~0.10 vs **깨끗한 진짜 0**의
+    마진 0.001~0.05로 역전돼 있어 어떤 임계값도 진짜 0을 먼저 죽임. 대응은
+    hud_round_settle._quarantine_zeros(K 단조성 도메인 규칙)로 이동 — 재시도 금지."""
     if glyph is None or not templates:
         return None, 0.0
     by_digit: dict[int, float] = {}

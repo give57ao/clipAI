@@ -62,6 +62,7 @@ def process_video(
     extract: bool,
     json_dir: Path = HUD_JSON_DIR,
     clips_dir: Path = HUD_CLIPS_DIR,
+    verify_boundary_wins: bool = False,
 ) -> dict:
     stem = mp4.stem
     json_out = json_dir / f"{stem}.json"
@@ -89,7 +90,10 @@ def process_video(
             pass
 
     try:
-        tl = scan_hud_aces(mp4, scan_fps=scan_fps, dataset_root=DATASET_ROOT)
+        tl = scan_hud_aces(
+            mp4, scan_fps=scan_fps, dataset_root=DATASET_ROOT,
+            verify_boundary_wins=verify_boundary_wins,
+        )
         json_dir.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8")
         print(format_report(tl), flush=True)
@@ -120,6 +124,11 @@ def main() -> int:
         "--output-root",
         default=None,
         help="산출물 루트 재지정 (예: D:\\hud_result) — 미지정시 E:\\clipai_result 기존 경로",
+    )
+    ap.add_argument(
+        "--verify-boundary-wins",
+        action="store_true",
+        help="R10 승수 교차검증 경계 게이트 활성화 (기본 꺼짐 — detect_ace_hud.py R10 주석 참고)",
     )
     args = ap.parse_args()
 
@@ -154,6 +163,7 @@ def main() -> int:
             extract=not args.no_extract,
             json_dir=json_dir,
             clips_dir=clips_dir,
+            verify_boundary_wins=args.verify_boundary_wins,
         )
         summary.append(r)
         if r["ok"]:

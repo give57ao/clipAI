@@ -116,4 +116,5 @@
 | `files/gt_aces.json` | **완성**(T2 산출물) — GT 61영상/107구간 + source_available |
 | T1 (requirements) | **완료** (`9094d60`) — easyocr 추가, 전수조사로 발견 |
 | T2 (GT 이관) | **완료** (`a95cb1e`) — recall/precision 이관 전후 완전 동일 검증 |
-| T3~T7 | 미착수 — 이 문서가 명세 |
+| T3 (pytest 도입) | **완료** — `files/tests/`(cache_io 왕복·boundary fail-open·timeline 골든 8건), `requirements-dev.txt`. 기존 코드 무수정 |
+| T4~T7 | 미착수 — 이 문서가 명세 |

@@ -54,6 +54,14 @@ def load_boundary_verdicts(stem: str, cache_dir: Path) -> list[list] | None:
     return json.loads(p.read_text(encoding="utf-8")).get("runs", [])
 
 
+def load_inline_extras(cache_path: Path) -> tuple[list | None, list | None]:
+    """T4(2026-07-17): hud_cache_io.save_scan_cache가 {stem}.json 자체에 인라인으로
+    저장한 boundary_verdicts/score_win_events. 별도 .boundary.json 방식(R2 Task 1)의
+    구 캐시에는 이 키가 없으므로 None — 호출측이 기존 로더로 폴백."""
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
+    return data.get("boundary_verdicts"), data.get("score_win_events")
+
+
 def load_score_win_events(stem: str) -> list[dict] | None:
     """R6(2026-07-13) 상단 스코어 이벤트. score_cache 없으면 None(게이트 비활성)."""
     from dataclasses import asdict
@@ -93,8 +101,9 @@ def main() -> int:
         if cp.name.endswith(".boundary.json"):
             continue
         reads, duration, scan_fps, stem = load_reads(cp)
-        boundary_verdicts = load_boundary_verdicts(stem, cache_dir)
-        score_win_events = load_score_win_events(stem)
+        inline_verdicts, inline_events = load_inline_extras(cp)
+        boundary_verdicts = inline_verdicts if inline_verdicts is not None else load_boundary_verdicts(stem, cache_dir)
+        score_win_events = inline_events if inline_events is not None else load_score_win_events(stem)
         tl = timeline_from_reads(
             reads,
             duration=duration,

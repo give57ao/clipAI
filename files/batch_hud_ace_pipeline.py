@@ -35,6 +35,7 @@ DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 HUD_JSON_DIR = Path(r"E:\clipai_result\hud_timeline")
 HUD_CLIPS_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 SUMMARY_PATH = Path(r"E:\clipai_result\batch_hud_summary.json")
+CACHE_DIR = Path(r"E:\clipai_result\sig_cache_v2")  # T4 — hud_from_cache.py/hud_boundary_verify.py와 동일 기본값
 
 
 def _load_timeline(json_path: Path) -> HudAceTimeline:
@@ -63,6 +64,7 @@ def process_video(
     json_dir: Path = HUD_JSON_DIR,
     clips_dir: Path = HUD_CLIPS_DIR,
     verify_boundary_wins: bool = False,
+    cache_dir: Path | None = None,
 ) -> dict:
     stem = mp4.stem
     json_out = json_dir / f"{stem}.json"
@@ -93,6 +95,7 @@ def process_video(
         tl = scan_hud_aces(
             mp4, scan_fps=scan_fps, dataset_root=DATASET_ROOT,
             verify_boundary_wins=verify_boundary_wins,
+            cache_dir=cache_dir,
         )
         json_dir.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -137,10 +140,12 @@ def main() -> int:
         json_dir = out_root / "hud_timeline"
         clips_dir = out_root / "ace_clips_hud"
         summary_path = out_root / "batch_hud_summary.json"
+        cache_dir = out_root / "sig_cache_v2"
     else:
         json_dir = HUD_JSON_DIR
         clips_dir = HUD_CLIPS_DIR
         summary_path = SUMMARY_PATH
+        cache_dir = CACHE_DIR
 
     obs = Path(args.obs_dir)
     videos = sorted(obs.glob("*.mp4"))
@@ -164,6 +169,7 @@ def main() -> int:
             json_dir=json_dir,
             clips_dir=clips_dir,
             verify_boundary_wins=args.verify_boundary_wins,
+            cache_dir=cache_dir,
         )
         summary.append(r)
         if r["ok"]:

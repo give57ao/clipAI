@@ -53,22 +53,26 @@
    `timeline_from_reads` 출력(rounds 수·ace 판정)을 스냅샷 고정. E: 미존재 시 skip 처리.
 **수용 기준**: `pytest files/tests -q` 전체 통과. 기존 코드 수정 없음(테스트만 추가).
 
-## T4. [평가 종료 후] 캐시를 스캔 경로에 배선 (§A-1) — **최우선 가치**
+## T4. [평가 종료 후] 캐시를 스캔 경로에 배선 (§A-1) — **최우선 가치** — **완료**
 
-**목표**: 스캔 1회 = 캐시 1개. 이후 판정 실험은 영상 재디코딩 없이 수행.
-**준비된 것**: `files/hud_cache_io.py` (저장/로드 완성·왕복 검증 완료). 배선만 남음.
-**단계**:
-1. `detect_ace_hud.scan_hud_aces`(`detect_ace_hud.py:592` `timeline_from_reads` 호출 직전)에서
-   `hud_cache_io.save_scan_cache(stem, reads, duration, scan_fps, cache_dir,
-   boundary_verdicts=..., score_win_events=...)` 호출. `cache_dir`는 새 파라미터
-   `cache_dir: Path | None = None`으로 받아 None이면 저장 생략(기존 동작 보존).
-2. `batch_hud_ace_pipeline.py`에서 `cache_dir=<output_root>/sig_cache`로 전달
-   (`--output-root` 미지정 시 `E:\clipai_result\sig_cache`).
-3. 저장 실패는 경고 후 진행(스캔 결과를 죽이지 않음 — boundary_warning 패턴 답습,
-   `detect_ace_hud.py:577` 참고).
-4. 스모크: GT 영상 1개를 `--only`로 스캔 → 캐시 생성 확인 → `hud_from_cache.py`로 재생성한
-   JSON이 스캔 JSON과 동일한지 diff.
-**수용 기준**: 위 4의 동일성 + `_tp_diff --compare-to r10_cleanbase` 무변화.
+**결과**: `scan_hud_aces`에 `cache_dir: Path | None = None` 파라미터 추가,
+`timeline_from_reads` 호출 직전 `hud_cache_io.save_scan_cache` 호출(저장 실패는
+`cache_warning`으로 경고만 남기고 진행 — 기존 `boundary_warning` 패턴 그대로).
+`batch_hud_ace_pipeline.py`는 `cache_dir=<output_root>/sig_cache_v2` 전달
+(**주의**: 이 절 원문의 `sig_cache`는 오기 — 실제 소비측(`hud_from_cache.py`,
+`hud_boundary_verify.py`)이 이미 `sig_cache_v2`를 기본값으로 쓰고 있고, 구
+`sig_cache`(접미사 없음)는 HUD_ACE_HANDOFF.md에 "v1, 킬 이벤트 저장 방식 —
+폐기"로 명시된 완전히 다른 스키마라 그대로 썼다면 데이터 충돌이었음).
+추가로 `hud_from_cache.py`에 `load_inline_extras()`를 신설해 `save_scan_cache`가
+같은 파일에 인라인 저장한 `boundary_verdicts`/`score_win_events`를 우선 사용하고
+없으면(구 캐시) 기존 별도 `.boundary.json` 로더로 폴백 — 이게 없으면 스모크 4의
+동일성 자체가 성립 안 함(구 로더는 인라인 키를 모름).
+**스모크 검증**: GT 영상 `2026-03-30 02-14-48`(원본 있음, 73.6s) 스캔 → scratch
+`--output-root`에 캐시 생성 확인(`version:2`, `boundary_verdicts` 인라인 존재) →
+`hud_from_cache.py` 재생성 JSON과 원본 스캔 JSON `diff` 완전 동일 확인.
+`_tp_diff --compare-to r10_cleanbase`: 77/107 Δ0 (변경 전후 동일 — 기존 9개
+`sig_cache_v2` 캐시는 인라인 키가 없어 폴백 경로로 기존과 100% 동일 동작).
+`pytest files/tests -q`: 8 passed.
 **후속(사용자 승인 후)**: 원본 있는 GT 51영상 캐시 일괄 구축(단일 프로세스, 영상당 20-30분).
 드라이브 용량 부족으로 원본 추가 삭제 예정이므로 **삭제 전 캐시 구축이 데이터 보존의 마지막 기회** —
 `files/_gt_source_audit.py` 재실행으로 대상 목록 갱신.
@@ -117,4 +121,5 @@
 | T1 (requirements) | **완료** (`9094d60`) — easyocr 추가, 전수조사로 발견 |
 | T2 (GT 이관) | **완료** (`a95cb1e`) — recall/precision 이관 전후 완전 동일 검증 |
 | T3 (pytest 도입) | **완료** — `files/tests/`(cache_io 왕복·boundary fail-open·timeline 골든 8건), `requirements-dev.txt`. 기존 코드 무수정 |
-| T4~T7 | 미착수 — 이 문서가 명세 |
+| T4 (캐시 배선) | **완료** — 스모크(2026-03-30 02-14-48) diff 동일, `_tp_diff` Δ0, `hud_from_cache.py` 인라인 폴백 추가 |
+| T5~T7 | 미착수 — 이 문서가 명세 |

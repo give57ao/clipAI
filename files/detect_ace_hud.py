@@ -555,6 +555,7 @@ def scan_hud_aces(
     verify_boundaries: bool = True,
     verify_score_wins: bool = True,
     verify_boundary_wins: bool = False,
+    cache_dir: Path | None = None,
 ) -> HudAceTimeline:
     """R5(2026-07-09): verify_boundaries=True(기본)면 row_miss 경계 후보를 전광판
     CNN으로 스팟 검증(R2 Task 1) — 지금까지 hud_from_cache.py(라벨 10영상 전용
@@ -563,7 +564,12 @@ def scan_hud_aces(
     가리는 게 짧은 row_miss run으로 잡혀 진짜 라운드가 쪼개지는 사례를 04-13
     22-46-39(12:46-12:52, K 3→3 불변·D 1 불변인데 라운드 분리됨), 04-24 00-43-29
     등에서 확인 — 검증기가 이미 겨냥하던 실패 모드와 정확히 일치.
-    모델 로드 실패(CUDA 문제 등) 시 경고만 남기고 검증 없이 진행(회귀 없음)."""
+    모델 로드 실패(CUDA 문제 등) 시 경고만 남기고 검증 없이 진행(회귀 없음).
+
+    cache_dir: T4(2026-07-17, SONNET_TASKS.md §A-1) — 지정하면 reads/boundary_verdicts/
+    score_win_events 전체를 hud_cache_io.save_scan_cache로 <cache_dir>/<stem>.json에
+    영속화(스캔 1회 = 캐시 1개, 이후 hud_from_cache.py로 영상 재판독 없이 재실험).
+    None(기본)이면 저장 생략 — 기존 동작 완전 보존."""
     reads, duration, err = collect_reads(
         Path(video_path), scan_fps=scan_fps, dataset_root=dataset_root
     )
@@ -589,6 +595,16 @@ def scan_hud_aces(
                 score_win_events = [_asdict(e) for e in score_events(score_tl)]
         except Exception as exc:  # noqa: BLE001 — R6 부가 기능, 실패해도 스캔은 진행
             score_warning = f"score_wins_verify_failed:{exc}"
+    cache_warning = None
+    if cache_dir is not None:
+        try:
+            from hud_cache_io import save_scan_cache
+            save_scan_cache(
+                Path(video_path).stem, reads, duration, scan_fps, Path(cache_dir),
+                boundary_verdicts=boundary_verdicts, score_win_events=score_win_events,
+            )
+        except Exception as exc:  # noqa: BLE001 — 캐시 저장 실패로 스캔 결과를 죽이지 않음
+            cache_warning = f"cache_save_failed:{exc}"
     timeline = timeline_from_reads(
         reads,
         duration=duration,
@@ -605,6 +621,8 @@ def scan_hud_aces(
         timeline.warnings.append(boundary_warning)
     if score_warning:
         timeline.warnings.append(score_warning)
+    if cache_warning:
+        timeline.warnings.append(cache_warning)
     return timeline
 
 

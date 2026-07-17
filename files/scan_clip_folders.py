@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""폴더에 정리된 클립 mp4를 스캔해 clips_index.csv 생성.
+"""[LEGACY-ML] 폴더에 정리된 클립 mp4를 스캔해 clips_index.csv 생성.
 
 사용자가 이미 잘라둔 mp4를 아래처럼 넣으면 됩니다:
   clips/doublekill/*.mp4

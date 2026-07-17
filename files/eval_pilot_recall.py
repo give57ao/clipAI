@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""파일럿 OBS 추론 결과 vs known_highlights.csv recall 평가."""
+"""[LEGACY-ML] 파일럿 OBS 추론 결과 vs known_highlights.csv recall 평가."""
 
 from __future__ import annotations
 

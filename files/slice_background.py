@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""background 폴더의 긴 녹화본을 학습용 짧은 클립으로 분할.
+"""[LEGACY-ML] background 폴더의 긴 녹화본을 학습용 짧은 클립으로 분할.
 
 입력:  clips/background/*.mp4  (풀 녹화본)
 출력:  clips/background/_chunks/{원본이름}_part_0001.mp4

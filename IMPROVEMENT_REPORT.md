@@ -220,9 +220,21 @@ HANDOFF는 "역쌓기 로그"라 최신 결론과 뒤집힌 과거 결론(07-15 
 **현상**: `files/_*.py` 32개가 커밋도 gitignore도 아닌 상태로 3주째 존재(git status 소음,
 백업 없음). 이 중 `_nick_fail_diag.py`는 추적 파일이 의존하는 함수를 import하는 등 가치 편차가 큼.
 
-**제안 작업**: 3분류 — (a) 재사용 가치 있는 진단 도구는 커밋, (b) 일회성 캘리브레이션 산출물
-(`_calibrate_*` 9개, `_grid_*` 3개 등)은 `files/attic/`으로 이동 후 커밋(히스토리 보존) 또는
-사용자 승인 하에 삭제, (c) 나머지는 개별 판단. **삭제는 반드시 사용자 확인 후** — 전부
+**분류표(T7, 2026-07-17 — 표만 산출, 실제 이동·삭제는 사용자 승인 대기)**: 각 파일의
+import·docstring을 확인해 3분류. 판단 근거: `kill_timeline` 참조 12개는 레거시(§C) 산출물
+전용이고 그 결론은 이미 HANDOFF/본 보고서에 기록돼 원본 스크립트의 재사용 가치가 낮음 —
+`hud_timeline` 기반 현행 도구(`_compare_hud_gt.py`, `_miss_diag.py` 등, 이미 추적됨)로 대체됨.
+
+| 분류 | 파일 | 근거 |
+|------|------|------|
+| **(a) 커밋 권장** (2) | `_nick_fail_diag.py` | §C-2가 명시한 살아있는 함수(`scoreboard_k_reader.nick_match_score`)의 유일한 소비자 — 레거시 SB 경로가 남아있는 한 닉 매칭 실패 진단에 재사용 가치 |
+| | `_integrate_miss_feedback.py` | `MISS_FEEDBACK_FORM.md`(HANDOFF가 현재도 참조하는 살아있는 문서) 파서. `--update`는 미구현 스텁이지만 `--show` 프리뷰는 동작 — 미탐 30건("아직미탐") 재검토 시 재사용 가능 |
+| **(b) attic** — 레거시 SB ROI 캘리브레이션/그리드서치 (12) | `_calibrate_hud.py`, `_calibrate_hud3.py`, `_calibrate_kd.py`, `_calibrate_kd_roi.py`, `_calibrate_kda_grid.py`, `_calibrate_team_roi.py`, `_calibrate_wins.py`, `_calibrate_wins2.py`, `_grid_kd.py`, `_grid_kd2.py`, `_grid_r38.py`, `_verify_kd_roi.py` | `scoreboard_layout` ROI/OCR 튜닝 — 현재 `hud_digit_match.py` 템플릿 매칭으로 대체됨. 재실행 가치는 낮으나 ROI 튜닝 히스토리로서 보존 가치 |
+| **(b) attic** — 프로토타입/디버그 (6) | `_proto_kda.py`, `_proto_strip.py`, `_debug_identity_votes.py`, `_debug_r03.py`, `_debug_wm.py`, `_peek_rows.py` | 위와 동일 계보(레거시 SB) 1회성 디버그 스크립트 |
+| **(c) 삭제 후보** — kill_timeline(레거시) 전용 분석 (12) | `_analyze_aces.py`, `_compare_v2.py`, `_delta3_funnel.py`, `_extract_candidates.py`, `_fp_estimate.py`, `_funnel_analysis.py`, `_gap_analysis.py`, `_hole_audit.py`, `_make_candidates_json.py`, `_recall_stats.py`, `_team_layout_map.py`, `_verify_ace_frames.py` | 전부 `kill_timeline` 산출물 대상(현행 `hud_timeline`과 무관). 이 스크립트들의 결론은 이미 HANDOFF/본 보고서에 문서화됨 — 원본 재실행 가치 낮음. 히스토리 보존을 원하면 attic도 대안 |
+
+**제안 작업**: (a) 2개 커밋, (b) 18개 `files/attic/`으로 이동 후 커밋(히스토리 보존),
+(c) 12개는 사용자 승인 하에 삭제 또는 attic. **삭제·이동은 반드시 사용자 확인 후** — 전부
 git 밖이라 복구 불가.
 
 ### E-3. requirements.txt 불완전

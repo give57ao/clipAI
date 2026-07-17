@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""B안 검증: scouter_nick.py로 영상당 본인 닉 추출 (랜덤 샘플)."""
+"""[LEGACY-SB] B안 검증: scouter_nick.py로 영상당 본인 닉 추출 (랜덤 샘플)."""
 
 from __future__ import annotations
 

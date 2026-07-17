@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""라벨링/학습 프로젝트 초기 세팅 (4종 하이라이트)."""
+"""[LEGACY-ML] 라벨링/학습 프로젝트 초기 세팅 (4종 하이라이트)."""
 
 from __future__ import annotations
 

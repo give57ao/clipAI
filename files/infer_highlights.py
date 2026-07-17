@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""OBS 녹화본에서 하이라이트 구간 탐지 및 클립 추출 (2단계 모델)."""
+"""[LEGACY-ML] OBS 녹화본에서 하이라이트 구간 탐지 및 클립 추출 (2단계 모델)."""
 
 from __future__ import annotations
 

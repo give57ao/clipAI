@@ -108,16 +108,27 @@
 행수불변·fp-GT충돌 플래그).
 **수용 기준**: ledger 행 수(326) = 스캔된 mp4 수(326) ✓. `오답` 33건 fp로 들어감(원문 29 → 33 정정) ✓.
 
-## T7. [지금 가능] 저장소 위생 (§E-1, §E-2, §B-5-1단계)
+## T7. [지금 가능] 저장소 위생 (§E-1, §E-2, §B-5-1단계) — **완료**
 
-**단계**:
-1. `HANDOFF.md` 최상단에 "현재 유효 사실 요약(≤30줄)" 블록 신설, 뒤집힌 절(07-15 R10 결론)에
-   `[폐기됨 → 07-16 절 참고]` 머리표.
-2. 레거시 파일 docstring 첫 줄에 `[LEGACY-ML]`/`[LEGACY-SB]` 태그 (IMPROVEMENT_REPORT §C-1 표 기준,
-   **§C-2의 살아있는 의존성 5개는 태그 금지**).
-3. 미추적 `files/_*.py` 32개 분류표 작성(커밋 권장/attic/삭제 후보) — **실제 삭제·이동은
-   사용자 승인 대기**, 표만 산출.
-**수용 기준**: 태그는 주석 1줄 추가만(코드 변화 0) — `git diff --stat`으로 확인.
+**결과**:
+1. `HANDOFF.md` 최상단에 "현재 유효한 사실 요약" 블록 신설(내용 22줄, ≤30줄 충족). 07-15 R10
+   절 헤더에 `[폐기됨 → 위 "2026-07-16 정정" 절 참고]` 머리표 추가(기존 문장식 경고를
+   스캔 가능한 표준 태그로 교체).
+2. **§C-1/§C-2 표 자체를 실제 import 그래프로 재검증 후 태깅**(그대로 따랐으면 오탐이었을
+   케이스 발견) — `ml_train_common.py`(`hud_boundary_verify.py`가 `build_model` 직접 import),
+   `labeling_constants.py`(`ml_train_common.py`가 모듈 최상단에서 import, 따라서 런타임 하드
+   의존성), `scoreboard_layout.py`(`hud_kda.py`가 `get_reader`/`_ocr_mask_digit` 직접 import —
+   `requirements.txt`의 easyocr 필수 사유 그 자체), `nick_fuzzy.py`/`scouter_nick.py`
+   (`scoreboard_layout.py`가 모듈 최상단에서 import) — 이 5개는 §C-2 원문에 없던 **살아있는
+   의존성 추가 발견**이라 태그하지 않음(§C-2 원문 5개 + 이번에 찾은 5개 = 총 10개 제외).
+   실제 태깅 17개(LEGACY-ML 10, LEGACY-SB 7) — `git diff --stat` 확인 결과 파일당 정확히
+   1줄 변경(2 +-), 코드 변화 0.
+3. 미추적 `files/_*.py` 32개 분류표를 `IMPROVEMENT_REPORT.md` §E-2에 작성 — (a) 커밋 권장 2개
+   (`_nick_fail_diag.py`, `_integrate_miss_feedback.py`), (b) attic 18개(레거시 SB ROI
+   캘리브레이션/그리드서치 12 + 프로토타입/디버그 6), (c) 삭제 후보 12개(`kill_timeline`
+   레거시 전용 분석 — 현행 `hud_timeline`과 무관, 결론은 이미 문서화됨). **실제 이동·삭제는
+   미수행**(표만 산출, 파일 상태 불변).
+**수용 기준**: 태그는 주석 1줄 추가만(코드 변화 0) — `git diff --stat` 확인 완료(17파일 × 2 +-).
 
 ---
 
@@ -136,4 +147,4 @@
 | T4 (캐시 배선) | **완료** — 스모크(2026-03-30 02-14-48) diff 동일, `_tp_diff` Δ0, `hud_from_cache.py` 인라인 폴백 추가 |
 | T5 (배치 동시실행 락) | **완료** — `scan_lock`, `_pid_alive`(OpenProcess), 테스트 6건 |
 | T6 (검수 대장) | **완료** — `review_ledger.csv` 326행(tp59/fp33/unreviewed234), 오답 카운트 29→33 정정 |
-| T7 | 미착수 — 이 문서가 명세 |
+| T7 (저장소 위생) | **완료** — HANDOFF 요약블록+폐기표시, 레거시 태그 17개(+살아있는 의존성 5개 추가발견으로 제외), 미추적 32개 분류표 |

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""known_highlights + (선택) background 영상으로 label_segments.csv 생성."""
+"""[LEGACY-ML] known_highlights + (선택) background 영상으로 label_segments.csv 생성."""
 
 from __future__ import annotations
 

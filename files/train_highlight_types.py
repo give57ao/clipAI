@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2단계: 하이라이트 클립만 4종 타입 분류 (double/multikill/save/allkill)."""
+"""[LEGACY-ML] 2단계: 하이라이트 클립만 4종 타입 분류 (double/multikill/save/allkill)."""
 
 from __future__ import annotations
 

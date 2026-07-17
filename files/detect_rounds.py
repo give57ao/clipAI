@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""1a 단계: scoreboard 분류기로 영상을 스캔해 라운드 자동 분할.
+"""[LEGACY-SB] 1a 단계: scoreboard 분류기로 영상을 스캔해 라운드 자동 분할.
 
 - scoreboard_clf_best.pt 로 일정 간격 프레임 분류 (학습된 CNN)
 - 연속 scoreboard 감지를 병합 → 스코어보드 윈도우

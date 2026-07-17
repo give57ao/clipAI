@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""OBS 폴더 전체 배치: detect_rounds → scoreboard_k_reader → extract_ace_clips.
+"""[LEGACY-SB] OBS 폴더 전체 배치: detect_rounds → scoreboard_k_reader → extract_ace_clips.
 
 각 영상마다 라운드 분할 → 본인 K 읽기 → 올킬 클립 추출을 순차 실행한다.
 GPU(CNN + EasyOCR)를 공유하므로 영상 단위는 순차(병렬 X)로 돈다.

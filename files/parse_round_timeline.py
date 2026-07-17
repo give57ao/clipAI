@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""라운드 타임라인 txt → round_segments.csv 변환.
+"""[LEGACY-SB] 라운드 타임라인 txt → round_segments.csv 변환.
 
 manifests/round_timelines/*.txt 를 읽어 구간 CSV를 만듭니다.
 - "START - END  라벨"  → 구간

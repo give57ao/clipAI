@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""1단계: 하이라이트 vs background 이진 분류기 학습."""
+"""[LEGACY-ML] 1단계: 하이라이트 vs background 이진 분류기 학습."""
 
 from __future__ import annotations
 

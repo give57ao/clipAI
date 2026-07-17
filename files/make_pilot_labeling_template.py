@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""파일럿 라벨링 템플릿 CSV 생성."""
+"""[LEGACY-ML] 파일럿 라벨링 템플릿 CSV 생성."""
 
 from __future__ import annotations
 

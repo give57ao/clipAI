@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""샘플별 닉 추출 실패 원인 분석."""
+"""[LEGACY-SB] 샘플별 닉 추출 실패 원인 분석."""
 
 from __future__ import annotations
 

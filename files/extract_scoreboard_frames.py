@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""round_segments.csv 기반 스코어 화면 감지용 프레임 추출.
+"""[LEGACY-SB] round_segments.csv 기반 스코어 화면 감지용 프레임 추출.
 
 scoreboard 구간 → positive, 나머지 → negative 로 jpg 저장.
 1단계 라운드 분할용 "전체스코어 화면 분류기" 학습 데이터를 만듭니다.

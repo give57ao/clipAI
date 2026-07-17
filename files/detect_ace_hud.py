@@ -554,7 +554,7 @@ def scan_hud_aces(
     dataset_root: Path | None = None,
     verify_boundaries: bool = True,
     verify_score_wins: bool = True,
-    verify_boundary_wins: bool = False,
+    verify_boundary_wins: bool = True,
     cache_dir: Path | None = None,
 ) -> HudAceTimeline:
     """R5(2026-07-09): verify_boundaries=True(기본)면 row_miss 경계 후보를 전광판
@@ -636,6 +636,15 @@ def collect_reads(
 
     이 결과(신호 캐시)만 있으면 판정 로직은 영상 재판독 없이 무한 재실험 가능
     — hud_sig_cache.py 로 저장, hud_from_cache.py / timeline_from_reads 로 소비.
+
+    fail-open 재시도(2026-07-17): read/grab 실패를 곧장 EOF로 취급하지 않고 1회
+    재시도(verify_runs_live의 fail-open 계약과 동일 사고 — hud_boundary_verify.py
+    07-16 수정분 참고). 2-way 병렬 스캔 중 ffmpeg Stream timeout(디스크 I/O 경합)이
+    EOF와 동일하게 처리돼 영상 뒷부분이 경고 없이 통째로 사라진 실측 사고
+    (`2026-05-31 21-57-14`, R10 재평가 중 발견 — 정상 163라운드가 66라운드에서
+    조용히 절단됨)의 재발 방지. 재시도 후에도 실패하고 실제 길이보다 5초 넘게
+    일찍 끝나면 `early_break_Xs_of_Ys` 경고를 err로 반환 — 진짜 EOF(오차 <5s,
+    컨테이너의 프레임카운트 추정 오차 범위)는 기존처럼 조용히 종료.
     """
     get_hud_digit_matcher()
     cap = cv2.VideoCapture(str(video_path))
@@ -647,12 +656,25 @@ def collect_reads(
     duration = frame_total / fps if frame_total > 0 else 0.0
     step = max(1, int(round(fps / scan_fps))) if scan_fps > 0 else int(fps)
 
+    def _read_retry():
+        for _attempt in (0, 1):  # 일시적 I/O 지연은 재시도 1회로 흡수
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return True, frame
+        return False, None
+
+    def _grab_retry() -> bool:
+        for _attempt in (0, 1):
+            if cap.grab():
+                return True
+        return False
+
     reads: list[KRead] = []
     frame_idx = 0
     while True:
         if frame_idx % step == 0:
-            ok, frame = cap.read()
-            if not ok or frame is None:
+            ok, frame = _read_retry()
+            if not ok:
                 break
             t = frame_idx / fps
             game, _ = extract_game_crop_bgr(frame, dataset_root=dataset_root)
@@ -667,7 +689,7 @@ def collect_reads(
                 method = "triple_incomplete"
             reads.append(KRead(t=t, k=k, conf=float(conf), method=method, d=d, a=a))
         else:
-            if not cap.grab():
+            if not _grab_retry():
                 break
             frame_idx += 1
             if frame_idx / fps >= duration:
@@ -679,7 +701,9 @@ def collect_reads(
             break
 
     cap.release()
-    return reads, duration, None
+    reached = frame_idx / fps
+    err = f"early_break_{reached:.0f}s_of_{duration:.0f}s" if duration - reached > 5.0 else None
+    return reads, duration, err
 
 
 def _rounds_from_settled(
@@ -763,7 +787,7 @@ def timeline_from_reads(
     ace_kills: int = ACE_KILLS,
     boundary_verdicts: list[list] | None = None,
     score_win_events: list[dict] | None = None,
-    boundary_score_gate: bool = False,
+    boundary_score_gate: bool = True,
 ) -> HudAceTimeline:
     """원시 판독 리스트 → 라운드 분할·킬 이벤트·ace 판정 (영상 접근 없음).
 
@@ -795,16 +819,16 @@ def timeline_from_reads(
     구간적 판독 공백이 연쇄 병합으로 이어져 22분짜리 라운드가 생기며 TP 2건을
     삼킨 사례 발견 — `_prev_win_rejected` 참고, 회수는 최대 2라운드 병합으로 제한).
 
-    boundary_score_gate: R10 게이트의 총 스위치. **기본 False(비활성)** — GT 61영상
-    전체 재스캔 실측(2026-07-15) 결과 안전핀 적용 후에도 TP 69→68(Δ-1) 순손실 확인.
-    손실 10건 중 8건은 앵커 실패/win 이벤트 충분한 구간에서도 안전핀 유무와 무관하게
-    동일하게 발생 — R10이 아니라 **R5 CNN 경계검증기(`hud_boundary_verify.py`)의
-    선행 연쇄 기각 버그**(무제한, 이번 R10 안전핀의 보호 범위 밖)가 진짜 원인으로
-    추정됨(별도 조사 필요, 미해결). R10 자체(획득 9 vs 안전핀 후 순손실 -1)는 이
-    선행 버그와 뒤섞여 있어 단독 효과 확정 못 함 — 그래서 기본 비활성. 켜려면
-    `scan_hud_aces(..., verify_boundary_wins=True)`. `_SCORE_SPLIT_MIN_EVENTS` 폭0
-    ace 기각 게이트(R6, 위 문단)는 이미 별도로 검증됐으므로 이 스위치와 무관하게
-    항상 켜져 있음(회귀 없음).
+    boundary_score_gate: R10 게이트의 총 스위치. **기본 True(활성, 2026-07-17 전환)**.
+    2026-07-15 최초 실측(GT 61영상, TP 69→68 Δ-1)은 당시 R5 CNN 경계검증기의
+    fail-closed 버그(병렬 재스캔 I/O 타임아웃과 뒤섞임)로 오염된 측정이었음이
+    2026-07-16 규명·수정됨(`hud_boundary_verify.py` fail-open 계약, 상세는
+    HANDOFF.md "2026-07-16 정정" 절). 수정 후 클린 베이스라인(`r10_cleanbase`,
+    77/107 TP) 위에서 GT 51영상(원본 있는 것 전부) 재평가(2026-07-17) 결과
+    **유지 54 · 획득 1 · 상실 0** — TP 손실 0 원칙 통과 + 순증 1건 확인돼 기본
+    활성으로 전환. 끄려면 `scan_hud_aces(..., verify_boundary_wins=False)` 또는
+    `batch_hud_ace_pipeline.py --no-verify-boundary-wins`. `_SCORE_SPLIT_MIN_EVENTS`
+    폭0 ace 기각 게이트(R6, 위 문단)는 이 스위치와 무관하게 항상 켜져 있음.
     """
     timeline = HudAceTimeline(
         video_path=str(video_path),
@@ -821,7 +845,7 @@ def timeline_from_reads(
             timeline.k_row_miss += 1
 
     boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
-    _win_gate_active = boundary_score_gate and bool(score_win_events)  # R10: 기본 비활성(위 docstring 참고)
+    _win_gate_active = boundary_score_gate and bool(score_win_events)  # R10: 기본 활성(2026-07-17, 위 docstring 참고)
     _prev_win_rejected = False   # R10 안전핀: 연쇄 병합 방지(아래 주석 참고)
     for (start, last, _n) in rowmiss_runs(reads):
         if boundary_verdicts is not None:

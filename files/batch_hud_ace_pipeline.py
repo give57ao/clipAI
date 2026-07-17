@@ -129,6 +129,13 @@ def _load_timeline(json_path: Path) -> HudAceTimeline:
     )
 
 
+def _load_stems_filter(path: Path) -> set[str]:
+    """한 줄에 stem 하나씩 적힌 파일 → 대상 제한 집합. 빈 줄은 무시."""
+    return {
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    }
+
+
 def process_video(
     mp4: Path,
     *,
@@ -138,7 +145,7 @@ def process_video(
     extract: bool,
     json_dir: Path = HUD_JSON_DIR,
     clips_dir: Path = HUD_CLIPS_DIR,
-    verify_boundary_wins: bool = False,
+    verify_boundary_wins: bool = True,
     cache_dir: Path | None = None,
 ) -> dict:
     stem = mp4.stem
@@ -204,14 +211,21 @@ def main() -> int:
         help="산출물 루트 재지정 (예: D:\\hud_result) — 미지정시 E:\\clipai_result 기존 경로",
     )
     ap.add_argument(
-        "--verify-boundary-wins",
+        "--no-verify-boundary-wins",
         action="store_true",
-        help="R10 승수 교차검증 경계 게이트 활성화 (기본 꺼짐 — detect_ace_hud.py R10 주석 참고)",
+        help="R10 승수 교차검증 경계 게이트 비활성화 (기본 활성 — 2026-07-17 GT51 재평가 "
+             "유지54/획득1/상실0 검증 후 기본 전환. detect_ace_hud.py R10 주석 참고)",
     )
     ap.add_argument(
         "--force-parallel",
         action="store_true",
         help="동시 실행 락(T5, SONNET_TASKS.md §B-4) 우회 — 병렬 재스캔 I/O 오염 위험 감수",
+    )
+    ap.add_argument(
+        "--stems-file",
+        default=None,
+        help="한 줄에 stem 하나씩 적힌 파일로 대상 제한 (예: GT 서브셋 재평가). "
+             "미지정시 --obs-dir 전체 대상(기존 동작)",
     )
     args = ap.parse_args()
 
@@ -230,6 +244,9 @@ def main() -> int:
 
     obs = Path(args.obs_dir)
     videos = sorted(obs.glob("*.mp4"))
+    if args.stems_file:
+        wanted = _load_stems_filter(Path(args.stems_file))
+        videos = [p for p in videos if p.stem in wanted]
     if args.only:
         videos = [p for p in videos if p.stem == args.only]
     if args.after:
@@ -252,7 +269,7 @@ def main() -> int:
                     extract=not args.no_extract,
                     json_dir=json_dir,
                     clips_dir=clips_dir,
-                    verify_boundary_wins=args.verify_boundary_wins,
+                    verify_boundary_wins=not args.no_verify_boundary_wins,
                     cache_dir=cache_dir,
                 )
                 summary.append(r)

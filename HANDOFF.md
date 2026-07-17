@@ -8,21 +8,79 @@
 - **현재 TP 베이스라인: 77/107**(recall 72.0%, precision 80.2%) — `files/_tp_baselines/r10_cleanbase.json`
   (2026-07-16, fail-open 버그 수정 후 GT 50영상 클린 재스캔). 판독 경로를 건드릴 때마다
   `python -u files/_tp_diff.py --compare-to r10_cleanbase`로 무변화 증명할 것(`r8_final`은 낡은 참조).
-- **R10 게이트(`verify_boundary_wins`)는 기본 비활성** — 클린 베이스라인 위에서 아직 재평가 안 됨
-  (미해결 항목, 아래 "2026-07-16 정정" 절의 "다음 작업" 참고).
-- **배치 재스캔은 반드시 단일 프로세스** — 병렬 I/O 경합이 결과를 조용히 오염시킨 실제 사고
-  (아래 "2026-07-16 정정" 절) 이후, 2026-07-17 코드 레벨로 강제됨
-  (`batch_hud_ace_pipeline.scan_lock` — 동시 3번째 실행부터 자동 거부, `--force-parallel`로만 우회).
-- **`SONNET_TASKS.md`가 작업 명세·진행상황의 단일 소스** — T1~T6 완료(2026-07-16~17):
-  requirements 보수, GT→`files/gt_aces.json` 이관, `files/tests/` pytest 22건, 신호캐시를
-  스캔 경로에 배선(`hud_cache_io`), 동시실행 락, `E:\clipai_result\review_ledger.csv`(326행).
-  T7(이 절 포함 — 저장소 위생) 진행 중.
+- **R10 게이트(`verify_boundary_wins`)는 2026-07-17부터 기본 활성** — GT 51영상 재평가
+  (유지54/획득1/상실0, TP 손실 0 원칙 통과) 검증 후 전환. 끄려면 `--no-verify-boundary-wins`.
+  상세는 아래 "2026-07-17 R10 재평가 완료" 절.
+- **배치 재스캔 2-way 병렬 중 새 I/O 버그 발견·수정**: `collect_reads()`(디코딩 메인 루프)가
+  read 실패를 곧장 EOF로 취급해 영상 뒷부분이 경고 없이 통째로 잘리는 사고 실측
+  (`2026-05-31 21-57-14`, 163→66라운드 절단) → 재시도 1회 + `early_break_*` 경고로 수정
+  (`verify_runs_live`의 07-16 fail-open 계약과 동일 사고). 기존 클린 베이스라인 97건은
+  감사 결과 이 버그에 안 걸렸음(오염 없음).
+- **배치 재스캔은 원칙적으로 단일 프로세스** — 위 I/O 버그 수정 전 병렬 재스캔이 결과를
+  조용히 오염시킨 사고(아래 "2026-07-16 정정" 절) 이후, `batch_hud_ace_pipeline.scan_lock`
+  으로 동시 3번째 실행부터 자동 거부(`--force-parallel`로만 우회). 2-way까지는 안전이
+  검증된 범위(위 I/O 버그 수정 후).
+- **`SONNET_TASKS.md`가 작업 명세·진행상황의 단일 소스** — T1~T7 전부 완료(2026-07-16~17):
+  requirements 보수, GT→`files/gt_aces.json` 이관, `files/tests/` pytest 27건, 신호캐시를
+  스캔 경로에 배선(`hud_cache_io`), 동시실행 락, `E:\clipai_result\review_ledger.csv`(326행),
+  저장소 위생(레거시 태깅·미추적 분류표).
 - **후속 대기(사용자 승인 필요, T4 각주)**: 원본 있는 GT 51영상 캐시 일괄 구축 —
   단일 프로세스 17~25시간. 드라이브 용량 부족으로 원본 추가 삭제 예정이라 **삭제 전이
   데이터 보존의 마지막 기회**.
 - 아래 **"2026-07-15 R10: 미탐 34건 분석" 절은 폐기됨**(`[폐기됨 → 07-16 "정정" 절 참고]` 표시) —
   "R5 CNN 검증기 연쇄 기각 추정"은 틀렸고, 진범은 병렬 재스캔 I/O 타임아웃 × fail-closed 버그.
 - 구조적 원인·근거는 `IMPROVEMENT_REPORT.md`, 작업 단위 명세는 `SONNET_TASKS.md` 참고.
+
+## ★★★★★ 2026-07-17 R10 재평가 완료 — 기본 활성 전환 + collect_reads I/O 절단버그 발견·수정
+
+**배경**: 07-16 클린 베이스라인(77/107 TP) 위에서 R10(`verify_boundary_wins=True`) 재평가를
+GT 51영상(원본 있는 것 전부, E:\OBS 50 + D:\ 1)으로 실행. 이전 세션이 토큰 한도로 끊기기 전
+25/51을 이미 게이트-ON으로 스캔해뒀던 것을 발견 → 알려진 탭-병합 케이스(`02-55-36`,
+`22-46-39`)의 라운드 경계가 클린 베이스라인과 실제로 다른 것을 확인해 진짜 게이트-ON
+결과임을 검증하고 재사용, 남은 26개만 2-way 병렬로 마저 스캔.
+
+**1차 결과(오염됨)**: `_tp_diff --dir _r10_eval/hud_timeline --compare-to r10_cleanbase` →
+유지53 획득1 **상실24** — 그러나 상실 24건 중 23건은 원본 소실 10영상(애초에 51개 스캔
+대상 밖이라 `_r10_eval`에 파일 자체가 없음)이 diff 비교 범위에 잘못 끼어든 측정 방식
+문제였고, 남은 1건(`2026-05-31 21-57-14`)은 **2-way 병렬 스캔 중 진짜 데이터 손실**로 드러남
+— 로그에 `Stream timeout triggered`(ffmpeg, 30초) 발생, 정상 163라운드짜리 결과가
+66라운드(4067s 지점)에서 경고 없이 뚝 끊김.
+
+**근본 원인**: `detect_ace_hud.collect_reads()`(영상 1패스 디코딩 메인 루프,
+당시 `detect_ace_hud.py:654-656`)가 `cap.read()`/`cap.grab()` 실패를 재시도 없이 곧장
+"영상 끝"으로 취급 — I/O 타임아웃이 EOF와 동일하게 처리돼 영상 뒷부분이 통째로 사라짐.
+07-16에 고쳤던 `verify_runs_live`의 fail-closed 버그와 **동일한 클래스, 다른 위치**의
+미해결 버그였음. 기존 클린 베이스라인(97개 영상, ffprobe 실측 길이 대조)은 감사 결과
+이 버그에 안 걸렸음을 확인 — 오늘 이 특정 2-way 병렬 실행에서만 우연히 노출됨.
+
+**수정**(`detect_ace_hud.py`): read/grab 양쪽에 1회 재시도 추가(`verify_runs_live`와 동일
+계약). 재시도 후에도 실패하고 실제 프레임카운트 기준 길이보다 5초 넘게 일찍 끝나면
+`early_break_Xs_of_Ys` 경고를 반환(진짜 EOF는 조용히 종료, 오차 <5s 허용 — 컨테이너의
+프레임카운트 추정 오차 범위). `files/tests/test_collect_reads_failopen.py` 4건(transient
+read/grab 복구, persistent 실패 시 early_break 보고, 정상 EOF는 무경고).
+
+**손상된 영상 재스캔**(단일 프로세스): `2026-05-31 21-57-14` 완전 재스캔 → R153(147:48)까지
+정상 완주, 클린 베이스라인과 길이 일치.
+
+**최종(정정) 결과**: GT 51영상 범위 내에서만 비교 —
+
+```
+유지 54 | 획득 1 | 상실 0     범위내 TP 54 → 55 (Δ+1)
+  +획득 2026-03-30 02-55-36|17:14-18:00 (탭-스코어보드 가짜경계 회수 — R10이 겨냥하던 정확한 사례)
+```
+
+TP 손실 0 원칙 통과 + 순증 1건. 다만 애초 가설(§ "인접 라운드 킬 합==3" 16건 후보) 대비
+실제 회수는 1건뿐 — 나머지는 원본 소실 10영상 쪽에 있거나 가설이 과했던 것으로 추정,
+별도 검증 불가.
+
+**조치**: `timeline_from_reads`/`scan_hud_aces`의 `boundary_score_gate`/`verify_boundary_wins`
+기본값을 **True로 전환**(사용자 확인 후). `batch_hud_ace_pipeline.py`는
+`--verify-boundary-wins`(opt-in) → `--no-verify-boundary-wins`(opt-out)로 CLI 반전.
+`hud_from_cache.py`는 이 인자를 안 넘기므로 자동으로 새 기본값(True) 적용.
+
+**남은 일**: GT 61영상 중 10개(원본 소실)는 R10 효과를 영구히 검증 불가 — recall 분모에는
+계속 포함됨(§D-1 참고). `_MAX_CONCURRENT_SCANS`를 3 이상으로 올리는 건 이번 I/O 버그
+수정과 별개로 아직 근거 없음 — 2-way까지만 검증됨.
 
 ## ★★★★★ 2026-07-16 클린 재스캔 완료 — recall 68.2%→72.0%, TP 손실 0, 획득 8건 (fail-open 수정 효과만으로)
 

@@ -66,3 +66,9 @@ def test_lock_released_on_exception(tmp_path):
         with bhp.scan_lock(tmp_path):
             raise ValueError("boom")
     assert list(tmp_path.glob("*.lock")) == []
+
+
+def test_load_stems_filter_strips_blank_lines(tmp_path):
+    p = tmp_path / "stems.txt"
+    p.write_text("2026-03-19 23-00-50\n\n2026-03-22 03-02-03\n  \n", encoding="utf-8")
+    assert bhp._load_stems_filter(p) == {"2026-03-19 23-00-50", "2026-03-22 03-02-03"}

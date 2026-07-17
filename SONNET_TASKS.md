@@ -91,16 +91,22 @@
 몽키패치로 실제 프로세스 없이 결정론적 검증. CLI 스모크(`--only` 존재하지 않는 stem)로
 단일 실행 시 락 생성 후 정상 해제 확인. `pytest files/tests -q`: 14 passed.
 
-## T6. [지금 가능] 검수 대장 도입 (§D-3)
+## T6. [지금 가능] 검수 대장 도입 (§D-3) — **완료**
 
-**목표**: "태그 없음 = 정답인지 미검수인지 모름" 해소.
-**단계**:
-1. `files/_build_review_ledger.py` 신규: `E:\clipai_result` 하위 `ace_clips*` mp4 전수 스캔 →
-   파일명에서 stem/라운드/시각/`오답_*` 태그 파싱 → `E:\clipai_result\review_ledger.csv`
-   (`stem, round, t, verdict{fp|unreviewed}, note, path`) 생성. `오답` → fp, 그 외 unreviewed.
-2. gt_aces.json(T2)과 대조해 GT 구간과 매칭되는 클립은 verdict=tp 자동 기입.
-3. 읽기 전용 — 클립 파일 리네임·이동·삭제 금지.
-**수용 기준**: ledger 행 수 = 스캔된 mp4 수. 기존 `오답` 29건이 fp로 들어감.
+**결과**: `files/_build_review_ledger.py` 신규 — `E:\clipai_result\ace_clips*\**\*.mp4` 326건
+전수 스캔 → `E:\clipai_result\review_ledger.csv`(`stem, round, t, verdict, note, path`) 생성.
+**주의**: 이 절 원문의 "기존 오답 29건"은 오기 — `IMPROVEMENT_REPORT.md:196` 원본 실측 자체가
+33건이고, 실제 스캔도 33건으로 확인(재검증하며 바로잡음).
+파일명 컨벤션이 도구별로 5종 이상 혼재(ace-clip 후보 `_R{n}_{M}m{S}s_(hud_ace|ace)[_오답_설명]`,
+`하이라이트(n)` 수동추출, `miss_`/`탐색_`/`확인_R`/`R{n:03d}_킬` 진단 클립 등) — round/시각 개념이
+없는 147건은 파싱 불가로 verdict=unreviewed·note에 원인 기록 후 대장에 포함(행 수 불변 유지,
+조용히 스킵하면 수용 기준이 깨짐). gt_aces.json(T2) 대조로 tp 59건 자동 기입, 사람이 `오답`
+태깅했는데 GT 구간과도 겹치는 5건은 자동 재분류 없이 `[GT_CONFLICT]`로만 플래그(사람 판정 유지,
+후속 검수 대상으로 표시).
+실행 결과: 스캔 326건 tp=59 fp=33 unreviewed=234(미파싱 147 포함), GT_CONFLICT 5건. 읽기 전용
+(클립 파일 미변경). `files/tests/test_build_review_ledger.py` 8건(파싱 4종·GT매칭 허용오차·
+행수불변·fp-GT충돌 플래그).
+**수용 기준**: ledger 행 수(326) = 스캔된 mp4 수(326) ✓. `오답` 33건 fp로 들어감(원문 29 → 33 정정) ✓.
 
 ## T7. [지금 가능] 저장소 위생 (§E-1, §E-2, §B-5-1단계)
 
@@ -129,4 +135,5 @@
 | T3 (pytest 도입) | **완료** — `files/tests/`(cache_io 왕복·boundary fail-open·timeline 골든 8건), `requirements-dev.txt`. 기존 코드 무수정 |
 | T4 (캐시 배선) | **완료** — 스모크(2026-03-30 02-14-48) diff 동일, `_tp_diff` Δ0, `hud_from_cache.py` 인라인 폴백 추가 |
 | T5 (배치 동시실행 락) | **완료** — `scan_lock`, `_pid_alive`(OpenProcess), 테스트 6건 |
-| T6~T7 | 미착수 — 이 문서가 명세 |
+| T6 (검수 대장) | **완료** — `review_ledger.csv` 326행(tp59/fp33/unreviewed234), 오답 카운트 29→33 정정 |
+| T7 | 미착수 — 이 문서가 명세 |

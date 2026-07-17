@@ -77,13 +77,19 @@
 드라이브 용량 부족으로 원본 추가 삭제 예정이므로 **삭제 전 캐시 구축이 데이터 보존의 마지막 기회** —
 `files/_gt_source_audit.py` 재실행으로 대상 목록 갱신.
 
-## T5. [평가 종료 후] 배치 동시 실행 락 (§B-4)
+## T5. [평가 종료 후] 배치 동시 실행 락 (§B-4) — **완료**
 
-**목표**: 병렬 재스캔 사고(HANDOFF 07-16)의 코드 수준 재발 방지.
-**단계**: `batch_hud_ace_pipeline.py` main 시작부에 `<output_root>/.scan_locks/` 디렉터리 검사 —
-자기 PID 파일 생성, 활성 락(PID 생존 확인) 2개 초과면 안내 후 종료. `--force-parallel` 우회 플래그.
-종료·예외 시 자기 락 제거(try/finally). stale 락(죽은 PID)은 자동 청소.
-**수용 기준**: 동시 3개 기동 시 3번째가 거부됨. 단일 실행은 영향 없음.
+**결과**: `batch_hud_ace_pipeline.py`에 `scan_lock(lock_dir, force=...)` 컨텍스트매니저 신설 —
+`<out_root>/.scan_locks/<pid>.lock` 파일로 동시 실행 추적. `_pid_alive`는 Windows에서
+`os.kill(pid, 0)`을 쓰지 않음(그 신호값이 `TerminateProcess`로 오인돼 대상을 실제로
+죽이는 위험한 동작이라 `ctypes.OpenProcess`로 대체). 진입 시 stale(죽은 PID) 락 자동
+청소 → 생존 락 `_MAX_CONCURRENT_SCANS=2`개 이상이면 `ScanLockError`로 즉시 거부(안내
+메시지 출력 후 exit 1). `--force-parallel`로 우회 가능. `main()`의 스캔 루프+요약 저장
+전체를 `with scan_lock(...):` 안에 두어 종료·예외 시 `finally`로 자기 락 확실히 해제.
+**검증**: `files/tests/test_scan_lock.py` 6건(단일 실행 락 생성/해제, 2개 활성 시 3번째
+거부, 2개까지는 허용, stale 청소, `--force-parallel` 우회, 예외 시 해제) — `_pid_alive`
+몽키패치로 실제 프로세스 없이 결정론적 검증. CLI 스모크(`--only` 존재하지 않는 stem)로
+단일 실행 시 락 생성 후 정상 해제 확인. `pytest files/tests -q`: 14 passed.
 
 ## T6. [지금 가능] 검수 대장 도입 (§D-3)
 
@@ -122,4 +128,5 @@
 | T2 (GT 이관) | **완료** (`a95cb1e`) — recall/precision 이관 전후 완전 동일 검증 |
 | T3 (pytest 도입) | **완료** — `files/tests/`(cache_io 왕복·boundary fail-open·timeline 골든 8건), `requirements-dev.txt`. 기존 코드 무수정 |
 | T4 (캐시 배선) | **완료** — 스모크(2026-03-30 02-14-48) diff 동일, `_tp_diff` Δ0, `hud_from_cache.py` 인라인 폴백 추가 |
-| T5~T7 | 미착수 — 이 문서가 명세 |
+| T5 (배치 동시실행 락) | **완료** — `scan_lock`, `_pid_alive`(OpenProcess), 테스트 6건 |
+| T6~T7 | 미착수 — 이 문서가 명세 |

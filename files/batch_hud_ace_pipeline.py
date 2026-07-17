@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -36,6 +38,79 @@ HUD_JSON_DIR = Path(r"E:\clipai_result\hud_timeline")
 HUD_CLIPS_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 SUMMARY_PATH = Path(r"E:\clipai_result\batch_hud_summary.json")
 CACHE_DIR = Path(r"E:\clipai_result\sig_cache_v2")  # T4 — hud_from_cache.py/hud_boundary_verify.py와 동일 기본값
+DEFAULT_OUTPUT_ROOT = Path(r"E:\clipai_result")
+
+_MAX_CONCURRENT_SCANS = 2  # T5(SONNET_TASKS.md §B-4) — 이 값 초과 시 신규 실행 거부
+
+
+class ScanLockError(RuntimeError):
+    """동시 실행 한도 초과 — HANDOFF 07-16 병렬 재스캔 I/O 오염 사고 재발 방지."""
+
+
+def _pid_alive(pid: int) -> bool:
+    """프로세스 생존 확인. Windows에서 os.kill(pid, 0)은 신호 0을 TerminateProcess로
+    오인해 대상을 실제로 죽이는 위험한 우회이므로 사용 금지 — OpenProcess로 대체."""
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    import ctypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def _clean_stale_locks(lock_dir: Path) -> None:
+    for p in lock_dir.glob("*.lock"):
+        try:
+            pid = int(p.stem)
+        except ValueError:
+            continue
+        if not _pid_alive(pid):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
+def scan_lock(lock_dir: Path, *, force: bool = False):
+    """<lock_dir>/<pid>.lock 파일로 동시 배치 스캔을 제한.
+
+    죽은 PID의 락(stale)은 진입 시 자동 청소. 생존 락이 _MAX_CONCURRENT_SCANS개
+    이상이면 ScanLockError로 즉시 거부(안내 메시지 포함) — 병렬 재스캔이 캐시/
+    산출물 디렉터리에 I/O 경합을 일으켜 결과를 오염시킨 실제 사고(HANDOFF 07-16)의
+    재발 방지. force=True(--force-parallel)면 검사를 건너뜀. 종료/예외 시 자기
+    락은 항상 제거(finally).
+    """
+    if force:
+        yield
+        return
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    _clean_stale_locks(lock_dir)
+    active = list(lock_dir.glob("*.lock"))
+    if len(active) >= _MAX_CONCURRENT_SCANS:
+        pids = sorted(p.stem for p in active)
+        raise ScanLockError(
+            f"활성 배치 스캔 {len(active)}개(PID {pids}) — 동시 실행 한도"
+            f"({_MAX_CONCURRENT_SCANS}) 초과. 병렬 재스캔은 I/O 경합으로 캐시를 "
+            f"오염시킬 수 있음(HANDOFF 07-16 사고 참고). 강제 실행하려면 --force-parallel."
+        )
+    my_lock = lock_dir / f"{os.getpid()}.lock"
+    my_lock.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        yield
+    finally:
+        try:
+            my_lock.unlink()
+        except OSError:
+            pass
 
 
 def _load_timeline(json_path: Path) -> HudAceTimeline:
@@ -133,6 +208,11 @@ def main() -> int:
         action="store_true",
         help="R10 승수 교차검증 경계 게이트 활성화 (기본 꺼짐 — detect_ace_hud.py R10 주석 참고)",
     )
+    ap.add_argument(
+        "--force-parallel",
+        action="store_true",
+        help="동시 실행 락(T5, SONNET_TASKS.md §B-4) 우회 — 병렬 재스캔 I/O 오염 위험 감수",
+    )
     args = ap.parse_args()
 
     if args.output_root:
@@ -142,6 +222,7 @@ def main() -> int:
         summary_path = out_root / "batch_hud_summary.json"
         cache_dir = out_root / "sig_cache_v2"
     else:
+        out_root = DEFAULT_OUTPUT_ROOT
         json_dir = HUD_JSON_DIR
         clips_dir = HUD_CLIPS_DIR
         summary_path = SUMMARY_PATH
@@ -156,38 +237,44 @@ def main() -> int:
     if args.limit > 0:
         videos = videos[: args.limit]
 
-    print(f"[hud-batch] 대상 {len(videos)}개  redo={args.redo}", flush=True)
-    summary = []
-    for i, mp4 in enumerate(videos, 1):
-        print(f"\n[hud-batch] ({i}/{len(videos)}) {mp4.name}", flush=True)
-        r = process_video(
-            mp4,
-            redo=args.redo,
-            scan_fps=args.scan_fps,
-            min_duration_sec=args.min_duration_sec,
-            extract=not args.no_extract,
-            json_dir=json_dir,
-            clips_dir=clips_dir,
-            verify_boundary_wins=args.verify_boundary_wins,
-            cache_dir=cache_dir,
-        )
-        summary.append(r)
-        if r["ok"]:
-            cached = " (cached)" if r.get("cached") else ""
-            print(
-                f"[hud-batch] OK {mp4.stem} ace={r['aces']} clips={r.get('clips',0)}{cached} "
-                f"({r.get('sec','?')}s)",
-                flush=True,
-            )
-        else:
-            print(f"[hud-batch] SKIP {mp4.stem}: {r['error']}", flush=True)
+    lock_dir = out_root / ".scan_locks"
+    try:
+        with scan_lock(lock_dir, force=args.force_parallel):
+            print(f"[hud-batch] 대상 {len(videos)}개  redo={args.redo}", flush=True)
+            summary = []
+            for i, mp4 in enumerate(videos, 1):
+                print(f"\n[hud-batch] ({i}/{len(videos)}) {mp4.name}", flush=True)
+                r = process_video(
+                    mp4,
+                    redo=args.redo,
+                    scan_fps=args.scan_fps,
+                    min_duration_sec=args.min_duration_sec,
+                    extract=not args.no_extract,
+                    json_dir=json_dir,
+                    clips_dir=clips_dir,
+                    verify_boundary_wins=args.verify_boundary_wins,
+                    cache_dir=cache_dir,
+                )
+                summary.append(r)
+                if r["ok"]:
+                    cached = " (cached)" if r.get("cached") else ""
+                    print(
+                        f"[hud-batch] OK {mp4.stem} ace={r['aces']} clips={r.get('clips',0)}{cached} "
+                        f"({r.get('sec','?')}s)",
+                        flush=True,
+                    )
+                else:
+                    print(f"[hud-batch] SKIP {mp4.stem}: {r['error']}", flush=True)
 
-    ok = [r for r in summary if r["ok"]]
-    total_aces = sum(len(r["aces"]) for r in ok)
-    print(f"\n[hud-batch] 완료 {len(ok)}/{len(summary)}  총 올킬 {total_aces}개", flush=True)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[hud-batch] 요약 -> {summary_path}", flush=True)
+            ok = [r for r in summary if r["ok"]]
+            total_aces = sum(len(r["aces"]) for r in ok)
+            print(f"\n[hud-batch] 완료 {len(ok)}/{len(summary)}  총 올킬 {total_aces}개", flush=True)
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[hud-batch] 요약 -> {summary_path}", flush=True)
+    except ScanLockError as exc:
+        print(f"[hud-batch] 거부: {exc}", flush=True)
+        return 1
     return 0
 
 

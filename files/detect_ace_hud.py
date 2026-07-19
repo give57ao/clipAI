@@ -76,8 +76,15 @@ _BOUNDARY_WIN_MARGIN_AFTER = 24.0
 # 클립 구간 — end-35 방식 대신 라운드 시작·첫 킬 기준
 _CLIP_PRE_ROUND_SEC = 6.0   # 라운드 시작 직전
 _CLIP_PRE_KILL_SEC = 14.0   # 첫 킬 이전 (킬 장면이 클립 앞쪽에 오도록)
-_CLIP_POST_END_SEC = 1.5    # 라운드 종료 직후 (스코어 잠깐만)
-_CLIP_MAX_SEC = 55.0
+_CLIP_POST_END_SEC = 6.0    # 라운드 종료 직후 — 07-19 검수에서 ace_sec이 라운드 초반이면 꼬리가
+                            # round_end+0.5s로 잘려 K/D 전환 결과를 못 보고 끝나는 사례 확인
+                            # (`2026-06-26 23-43-25 R54`, `2026-06-27 01-31-51 R16`) — 1.5→6.0,
+                            # 아래 내부 floor(0.5→5.0)도 같이 상향 (2026-07-19)
+_CLIP_MAX_SEC = 120.0      # R10 조사 중 발견: 55s 캡이 넓은 스팬 라운드에서 첫 킬 직전 버퍼를
+                            # 밀어내 킬 장면 자체가 잘리는 사고 확인(2026-05-17 21-47-39 R16) —
+                            # 2분으로 상향(2026-07-19 사용자 결정). 대신 라운드 경계 오검출이
+                            # 이제 최대 2분짜리 과다-긴 클립으로 이어질 수 있어 경계 정확도
+                            # 의존도가 커짐 — 사용자 인지하고 승인.
 
 
 @dataclass
@@ -903,7 +910,7 @@ def ace_clip_window(r: RoundTrack) -> tuple[float, float]:
 
     end = r.end_sec + _CLIP_POST_END_SEC
     if r.ace_sec is not None:
-        end = min(end, max(r.ace_sec + 12.0, r.end_sec + 0.5))
+        end = min(end, max(r.ace_sec + 12.0, r.end_sec + 5.0))
 
     if end - start > _CLIP_MAX_SEC:
         start = end - _CLIP_MAX_SEC

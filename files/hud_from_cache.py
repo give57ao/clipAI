@@ -81,6 +81,9 @@ def main() -> int:
     ap.add_argument("--report", action="store_true", help="라운드별 리포트 출력")
     ap.add_argument("--dump", nargs=3, metavar=("STEM", "FROM", "TO"),
                     help='원시 판독 덤프: --dump "stem" 41:50 42:10')
+    ap.add_argument("--no-boundary-score-gate", dest="boundary_score_gate",
+                    action="store_false", default=True,
+                    help="R10 승수 교차검증 게이트 비활성 (precision 회귀 조사용 — 캐시만으로 gate-off 상태 재현)")
     args = ap.parse_args()
 
     cache_dir = Path(args.cache_dir)
@@ -111,6 +114,7 @@ def main() -> int:
             scan_fps=scan_fps,
             boundary_verdicts=boundary_verdicts,
             score_win_events=score_win_events,
+            boundary_score_gate=args.boundary_score_gate,
         )
         (out_dir / f"{stem}.json").write_text(
             json.dumps(asdict(tl), ensure_ascii=False, indent=2), encoding="utf-8"

@@ -73,6 +73,18 @@ _BRIDGE_8 = True
 # 0.67 단발)이 걸러져 carry(4)→7이 gap=3 거짓 올킬이 됨 — 6을 쓰면 gap=1로 정정.
 _GAP_WEAK_CAP = True
 
+# --- R12 경계-이전 완료 증거 (2026-07-19 Fable — 사용자 120클립 검수 FP #49) ---
+# 실측: 05-19 01-36-22 R03 — K 4→6 킬 2개가 라운드윈 배너 **이전**(경계 2:08.9 전
+# 2:06.0)에 이미 완료됐고 그 K=6이 단발 conf 0.79로 관측까지 됐는데, 지지 필터
+# (n≥2 or conf≥0.88)에 걸러져 직전 라운드 체인에 못 들어감 → carry(4)→k_start(6)
+# gap=2가 다음 라운드 시작에 폭0 스탬프돼 (6→7 킬 1개와 합쳐져) 가짜 올킬.
+# 규칙: blind gap 중 **경계 이전 구간**(carry_t < t ≤ round_start)에서 k_start와
+# 같은 값이 (약하게라도) 관측되면 gap 킬 전부가 경계 전에 완료된 것 — 이 라운드
+# 몫이 아니므로 k_base를 k_start로 올려 gap 소거. 경계 *후* 관측은 이 라운드 킬일
+# 수 있으므로 증거로 안 씀(t ≤ s 제한이 TP 보호의 핵심). _GAP_WEAK_CAP과 같은
+# "줄이는 방향 전용" 원칙 — 킬을 늘리는 방향으로는 절대 작동 안 함.
+_GAP_PREBOUNDARY_CAP = True
+
 # --- R7 (2026-07-14): 격리된 '가짜 0'(=화면의 8)을 carry 전진 증거로 재활용 ---
 # 사용자 육안 검수(폭0 오탐 9건 전부 = 원본 존재분)로 지배적 원인 확정:
 # 8은 EXCLUDE_DIGITS라 판독 불가 → 누적 K가 8을 지나면 시스템이 마지막 깨끗값 7에
@@ -85,6 +97,17 @@ _GAP_WEAK_CAP = True
 # 03-12-36 R010 실측)은 gap=0이라 안 건드림 → 새 오탐 생성 원리적으로 불가.
 _EIGHT_EVID = True
 _EIGHT_EVID_MIN = 2          # blind gap 내 가짜-0(=8) 최소 지지 관측 수
+
+# --- R11 암전-라운드 gap 귀속 차단 (2026-07-19 Fable — 사용자 120클립 검수 FP 분석) ---
+# 실측: 05-26 23-45-51 R12 — R10이 K=8로 끝나고(8:40) R11(8:48-9:27)은 판독 성공
+# 0회(완전 암전), R12 첫 판독이 K=11(9:40) → carry(8)→11 gap=3이 R12 시작에 폭0
+# 스탬프돼 가짜 올킬. 실제 3킬은 R11(사용자 육안: 클립 시작 9:13에 이미 11/8)이라
+# 어느 라운드 몫인지 특정 불가. 03-12-36 R48(직전 2라운드 n=0)도 동일 지문.
+# gap 킬 귀속은 "carry가 직전 세그먼트에서 온" 경우(경계 부근 미관측 킬 — 정당한
+# TP 패턴, 04-24 00-43-29 5:50 실측)만 허용하고, 사이에 체인 없는 세그먼트가 통째로
+# 끼면(carry_seg < idx-1) 귀속 포기(kills 미집계, k_base 이월은 유지 — 이후 라운드
+# 정산은 정상). 재검증: GT108 캐시 재평가 TP 무손실 확인 후 채택할 것.
+_DARK_GAP_GUARD = True
 
 # --- D(데스) 채널 가드 (2026-07-09, 사용자 오탐 12건 검수 기반) ---
 # 도메인: 본인 D는 라운드 내 사망(+1) 외엔 변할 수 없다. 라운드 중 지지된 D 변화
@@ -109,6 +132,7 @@ class SettledRound:
     k_samples: int = 0          # 라운드 내 성공 판독 총 수 (G5 지표, 필터 전 원시 기준)
     chain_reads: int = 0        # 체인에 채택된 판독 수 (진단용)
     d_guard_dropped: int = 0    # D-가드가 무효화한 킬 수 (진단용, 2026-07-09)
+    gap_unattributed: int = 0   # R11 암전-gap 가드가 귀속 포기한 킬 수 (진단용, 2026-07-19)
 
 
 def _supported_obs(
@@ -262,6 +286,7 @@ def settle_rounds(
     rounds: list[SettledRound] = []
     carry_k: int | None = None
     carry_t: float = float("-inf")
+    carry_seg: int | None = None  # carry_k를 만든 세그먼트 인덱스 (R11 암전-gap 가드)
 
     for idx, (s, e) in enumerate(segs):
         r = SettledRound(index=idx, start_sec=s, end_sec=e)
@@ -331,6 +356,12 @@ def settle_rounds(
                 ]
                 if weak:
                     r.k_base = max(weak)
+                # R12: 경계 이전에 k_start 도달 증거가 있으면 gap 전체 소거
+                # (상단 _GAP_PREBOUNDARY_CAP 주석 참고 — t ≤ s 제한 필수)
+                if _GAP_PREBOUNDARY_CAP and any(
+                    v == r.k_start for (t, v, _c) in ok_reads if carry_t < t <= s
+                ):
+                    r.k_base = r.k_start
             # R7: 격리된 가짜-0(=8) 증거로 k_base 전진 (상단 _EIGHT_EVID 주석 참고).
             # blind gap의 raw 0은 quarantine 규칙상(직전 양수7 · 직후 양수10≥7) 전부
             # 가짜-0=8이므로, 지지되면 k_base를 8로 올려 gap +3 가짜 올킬을 +2로 정정.
@@ -362,6 +393,15 @@ def settle_rounds(
                     if prev_r.k_end is not None:
                         prev_r.k_end = max(prev_r.k_end, r.k_start)
                     r.k_base = r.k_start
+                elif (
+                    _DARK_GAP_GUARD
+                    and r.k_base == carry_k      # gap이 실제 carry 이월에서 온 경우만
+                    and carry_seg is not None
+                    and idx - carry_seg > 1      # 사이에 체인 없는 암전 세그먼트 존재
+                ):
+                    # R11: 암전 라운드를 건너온 gap 킬 — 발생 라운드 특정 불가, 귀속 포기
+                    # (상단 _DARK_GAP_GUARD 주석 참고. k_base/k_end 이월은 그대로 유지)
+                    r.gap_unattributed = gap
                 else:
                     # gap 킬 시각 = 라운드 시작(s) — 킬은 첫 관측(first_t) 시점이
                     # 아니라 그 이전(직전 경계 부근)에 일어난 것. first_t로 찍으면
@@ -380,6 +420,7 @@ def settle_rounds(
             r.kills = len(r.kill_times)
             carry_k = r.k_end
             carry_t = chain[-1][0]
+            carry_seg = idx
         rounds.append(r)
     return rounds
 
@@ -576,7 +617,48 @@ def _selftest() -> None:
     rs = settle_rounds(reads13b, [], 60.0)
     assert rs[0].kills == 3 and rs[0].k_start == 7, f"case13b 정탐유지: {rs[0]}"
 
-    print("hud_round_settle selftest: 15/15 OK")
+    # ⑭ R11 암전-gap 가드 — 05-26 23-45-51 R12 실측 유형: R0 K=8 안정 → R1 판독
+    #    0회(완전 암전) → R2 첫 관측 11. carry(8)→11 gap=3은 R1/R2 어느 쪽 킬인지
+    #    특정 불가 → 귀속 포기(폭0 가짜 올킬 소멸). k_base/k_end 이월은 유지.
+    reads14 = _fx(
+        (10.0, 8, 0.9, 8, 1.0),             # R0: K=8 안정 (마지막 판독 17s)
+        (100.0, 11, 0.9, 8, 1.0),           # R2: 첫 관측 11 (경계+40s, 그레이스 밖)
+    )
+    rs = settle_rounds(reads14, [30.0, 60.0], 130.0)
+    assert rs[1].chain_reads == 0, f"case14 R1 암전 전제: {rs[1]}"
+    assert rs[2].kills == 0 and rs[2].gap_unattributed == 3, f"case14: {rs[2]}"
+    assert rs[2].k_base == 8 and rs[2].k_end == 11, f"case14 이월: {rs[2]}"
+
+    # ⑭' 대조 — 같은 판독인데 암전 세그먼트 없이 직전 라운드에서 곧장 이월되면
+    #    기존 gap 귀속 유지 (04-24 00-43-29 5:50 실측 TP 패턴 보호)
+    rs = settle_rounds(reads14, [60.0], 130.0)
+    assert rs[1].kills == 3, f"case14b 직전이월 유지: {rs[1]}"
+
+    # ⑮ R12 경계-이전 완료 증거 — 05-19 01-36-22 R03 실측 유형: 직전 라운드 K=4
+    #    안정 → 경계 직전 K=6 단발(conf 0.79, 지지 미달) → 경계 → 다음 라운드에서
+    #    6 안정 후 7. gap(4→6) 킬 2개는 경계 전 완료된 것 — 소거되어 이 라운드는
+    #    6→7 킬 1개만 남아야 (기존엔 폭0 +2와 합쳐져 가짜 올킬).
+    reads15 = _fx(
+        (100.0, 4, 0.9, 10, 1.0),           # 직전 라운드 K=4 안정 (~110s)
+        (114.0, 6, 0.79, 1, 1.0),           # 경계(120s) 직전 단발 6 — 지지 미달
+        (135.0, 6, 0.9, 6, 1.0),            # 다음 라운드 6 안정 (경계+15s, 그레이스 밖)
+        (150.0, 7, 0.9, 6, 1.0),            # 라운드 내 진짜 킬 6→7
+    )
+    rs = settle_rounds(reads15, [120.0], 170.0)
+    assert rs[1].kills == 1 and rs[1].k_base == 6, f"case15: {rs[1]}"
+    assert rs[1].kill_times == [150.0], f"case15 kill_times: {rs[1].kill_times}"
+
+    # ⑮' 대조 — 같은 값 관측이 경계 *후*에만 있으면(이 라운드 킬일 수 있음) 미발동
+    #    (관측 전부 경계+10s 밖 — 그레이스도 미발동 → 기존 gap 귀속 유지 확인)
+    reads15b = _fx(
+        (100.0, 4, 0.9, 10, 1.0),
+        (131.0, 6, 0.79, 1, 1.0),           # 경계(120s)+11s 단발 6 — 증거로 못 씀
+        (135.0, 6, 0.9, 6, 1.0),
+    )
+    rs = settle_rounds(reads15b, [120.0], 170.0)
+    assert rs[1].kills == 2, f"case15b 경계후 관측은 미발동: {rs[1]}"
+
+    print("hud_round_settle selftest: 19/19 OK")
 
 
 if __name__ == "__main__":

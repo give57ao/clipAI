@@ -20,7 +20,11 @@ _K_IOU_MARGIN = 0.06   # 1등-2등 IoU 차이가 이보다 작으면 모호 → 
 # --- R4 (2026-07-07): 숫자 CNN 판독 — IoU는 8을 0/6/9와 구분 못 해 EXCLUDE_DIGITS로
 # 뺐던 근본 한계를 학습 분류기로 해소(train_hud_digit_cnn.py, held-out val_acc 99.7%,
 # 실프레임 스팟체크로 8 고신뢰 판독 확인). IoU는 CNN 모델이 없을 때만 폴백.
-_CNN_MODEL_PATH = Path(r"E:\Highlights\ml_dataset\models\hud_digit_clf_best.pt")
+# R15(2026-07-23): v2(체인-감독 재학습, SONNET_TASK_DIGIT_CNN.md) 전환.
+# T3 게이트: 0→8 오발 0.000%(n=372) 통과. D슬롯은 별도 게이트 보류 중이나
+# match_glyph_cnn() 자체는 hud_kda._CNN_V2_EIGHT/_CNN_V2_D 양쪽 플래그로
+# 호출 여부가 통제되므로 모델 파일 전환 자체는 안전(플래그 OFF면 미사용).
+_CNN_MODEL_PATH = Path(r"E:\Highlights\ml_dataset\models\hud_digit_clf_v2_best.pt")
 _CNN_MIN_P = 0.85
 _cnn_model = None
 _cnn_classes: list = []

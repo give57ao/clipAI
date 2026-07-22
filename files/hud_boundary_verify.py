@@ -77,8 +77,10 @@ def classify_frame(frame_bgr, model, transform, device: torch.device) -> float:
 def _load_cached_reads(cache_path: Path) -> tuple[list[KRead], str]:
     data = json.loads(cache_path.read_text(encoding="utf-8"))
     reads = [
-        KRead(t=t, k=k, conf=c, method=METHOD_DECODE.get(m, m))
-        for t, k, c, m in data["reads"]
+        # 구 스키마(4원소)와 신 스키마(6원소, d/a 포함 — 2026-07-09) 모두 지원
+        # (hud_from_cache.load_reads와 동일 패턴)
+        KRead(t=row[0], k=row[1], conf=row[2], method=METHOD_DECODE.get(row[3], row[3]))
+        for row in data["reads"]
     ]
     return reads, data["stem"]
 

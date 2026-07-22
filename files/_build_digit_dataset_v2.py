@@ -183,6 +183,32 @@ def _thin(items: list, key=lambda x: x, cap: int = _CAP_PER_CLASS) -> list:
     return kept
 
 
+_JUNK_MAX_IOU = 0.35  # R16: 모든 숫자 템플릿과의 최고 IoU가 이 미만일 때만 진짜 junk
+
+
+def _is_true_junk(glyph) -> bool:
+    """R16 junk 판정: 글리프가 0~9 어느 템플릿과도 닮지 않았는가.
+
+    템플릿을 '양성 라벨'로 쓰는 건 순환(v1의 실패)이지만, '음성 필터'로 쓰는 건
+    안전하다 — 어떤 숫자와도 IoU<_JUNK_MAX_IOU라면 그 글리프가 숫자일 가능성은
+    구조적으로 낮다. 반대로 숫자였다면(흐릿해도) 해당 숫자와 중간 유사도가 나온다.
+    """
+    from hud_digit_match import _iou_shifted, _GLYPH_SIZE, get_hud_digit_matcher
+    import cv2 as _cv2
+
+    matcher = get_hud_digit_matcher()
+    best = 0.0
+    for key, tmpl in matcher.k_templates.items():
+        if tmpl.shape != glyph.shape:
+            tmpl = _cv2.resize(tmpl, _GLYPH_SIZE, interpolation=_cv2.INTER_AREA)
+        s = _iou_shifted(glyph, tmpl)
+        if s > best:
+            best = s
+            if best >= _JUNK_MAX_IOU:
+                return False
+    return best < _JUNK_MAX_IOU
+
+
 # ---------------------------------------------------------------------------
 # 수확 실행 (영상 seek — Sonnet 배치 실행 파트)
 # ---------------------------------------------------------------------------
@@ -250,6 +276,13 @@ def harvest_stem(stem: str) -> dict[str, int]:
             g = normalize_glyph(p)
             if g is None:
                 continue
+            # R16 junk 재정의: "안정런 밖 miss"가 아니라 **어떤 숫자로도 설명 안
+            # 되는 형태**만 junk로 인정. 기존 기준은 빠른 킬스트릭 중 짧게 스쳐간
+            # 정상 숫자를 대량 오염시켰음(QC 실측, SONNET_TASK_DIGIT_CNN.md T1).
+            # 흐릿한 6/8 등은 해당 템플릿과 중간 유사도가 나와 자동 배제되므로
+            # 이 필터를 통과한 것만이 진짜 잡음(연기·파편·부분가림)이다.
+            if digits is None and label == "junk" and not _is_true_junk(g):
+                break  # 숫자로 보이는 글리프 — junk 라벨 금지, 이 프레임 폐기
             folder = folder_of(digits[gi]) if digits is not None else folder_of(None)
             d_out = OUT_DIR / folder
             d_out.mkdir(parents=True, exist_ok=True)

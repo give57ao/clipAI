@@ -26,13 +26,13 @@ _RED_WINS_X = (0.382, 0.458)
 _MID_ROUND_X = (0.462, 0.538)
 _BLUE_WINS_X = (0.542, 0.618)
 
-# R15(2026-07-23) v2 CNN 게이트 — 기본 OFF. 체인-감독 재학습 모델이
-# SONNET_TASK_DIGIT_CNN.md의 검증 게이트(TP 무손실 + FP 순증 0)를 통과한 뒤에만
-# True로 전환할 것. OFF면 기존 동작과 100% 동일 (R4 순손실 사고 재발 방지).
-_CNN_V2_EIGHT = False   # K 슬롯: 0/None 자리 8-증거 — 2026-07-23 파일럿 재스캔에서
-                        # TP 1건 손실 + FP 2건 신규(둘 다 폭0 패턴) 확인돼 롤백.
-                        # SONNET_TASK_DIGIT_CNN.md T4 실패 기록 참고 — 재활성 전
-                        # 원인(폭0 스탬프 오염 의심) 해소 필요
+# v2 CNN 게이트 — 기본 OFF. 파일럿 게이트(TP 무손실 + FP 순증 0) 통과 후에만 켤 것.
+_CNN_V2_EIGHT = False   # K 슬롯 CNN-8. R16(2026-07-23)으로 의미 변경: ON이어도 값을
+                        # 직접 주입하지 않고 '후보'(method='cnn8_cand')만 표기 —
+                        # 승격은 hud_cnn8_promote.py(시간적 동의 + 체인 인접 불변식:
+                        # 직전 지지값 7/8 → +1 초과 조작 원리적 불가)가 결정.
+                        # 구 방식(직접 주입)의 파일럿 FP 2건 사고 기록은
+                        # SONNET_TASK_DIGIT_CNN.md T4 참고. 파일럿 재검증 통과 후 ON.
 _CNN_V2_D = False       # D/A 슬롯: 미판독 자리 CNN 폴백 — 게이트 보류(SONNET_TASK_DIGIT_CNN.md
                         # T3 기록 참고: 위험한 오분류는 0건이나 공식 기준(99%) 미달로 대기)
 _CNN_V2_MIN_P8 = 0.92
@@ -174,8 +174,11 @@ def _read_digit_group(
     patches: list[np.ndarray],
     matcher,
     raw_patches: list[np.ndarray] | None = None,
-) -> tuple[int | None, float]:
-    """글리프 마스크 리스트(좌→우) → 다자리 정수. 하나라도 미매칭이면 None.
+) -> tuple[int | None, float, bool]:
+    """글리프 마스크 리스트(좌→우) → (다자리 정수, 신뢰도, cnn8후보 여부).
+
+    세 번째 반환값(R16): 이 그룹이 'CNN-8 후보'로 표기됐는가 — 값 미확정(None)
+    이면서 CNN이 8이라 주장하는 단일 글리프 K자리. 승격은 hud_cnn8_promote 소관.
 
     raw_patches (R8, 2026-07-14): 원본 BGR 크롭 — 전달되면(K 슬롯) IoU가 0 또는
     None을 반환한 자리에서 8-위상 프로브(`probe_eight_topology`)를 추가로 시도.
@@ -208,16 +211,22 @@ def _read_digit_group(
             # R8: '0' 또는 미판독 자리만 8-위상 프로브 (다른 확신 판독은 불변)
             if probe_eight_topology(raw_patches[gi]):
                 d, sc = 8, _EIGHT_PROBE_CONF
-        # R15(2026-07-23) v2 CNN 증거 — 체인-감독 데이터셋(_build_digit_dataset_v2.py)
-        # 재학습 모델 전용. R4와 동일하게 "0/None 자리 + 8만 채택" 스코프를 유지하되
-        # conf를 0.85로 캡: 정산의 지지 필터(_SUPPORT_SINGLE_CONF=0.88) 아래라
-        # 단발 스퓨리어스 8은 자동 탈락 = 시간적 상호확증(연속 2회+)이 공짜로 걸림.
-        # ⚠ 검증 게이트(SONNET_TASK_DIGIT_CNN.md §게이트) 통과 전엔 켜지 말 것.
-        if _CNN_V2_EIGHT and raw_patches is not None and (d is None or d == 0):
+        # R16(2026-07-23) v2 CNN-8 — 값을 직접 주입하지 않는다. 파일럿 실측(FP 2건,
+        # SONNET_TASK_DIGIT_CNN.md T4)으로 프레임 단위 주입은 "완전 미판독 구간에
+        # 조밀한 새 증거 등장 → gap-stamp 폭0 가짜 트리플" 사고가 확인됐다.
+        # 대신 '후보'로만 표기(method='cnn8_cand', k=None)하고, 승격 여부는
+        # hud_cnn8_promote.promote_cnn8_reads()가 전체 타임라인 문맥으로 결정
+        # (시간적 동의 + 체인 인접 불변식: 직전 지지값 7/8일 때만 — 상세는 그 모듈).
+        # 스코프: 단일 글리프 K자리 + IoU 완전 미판독(None)만. d==0 자리는 기존
+        # 가짜0 격리/위상 프로브 경로 소관이라 건드리지 않는다.
+        if (
+            _CNN_V2_EIGHT and raw_patches is not None and d is None
+            and len(patches) == 1
+        ):
             from hud_digit_match import match_glyph_cnn
             c_lab, c_p = match_glyph_cnn(glyph)
             if c_lab == 8 and c_p >= _CNN_V2_MIN_P8:
-                d, sc = 8, min(0.85, c_p)
+                return None, max(0.0, sc), True  # 후보 표기 — 값 주입 금지
         # R15 D-슬롯 CNN 폴백 — raw_patches 없는 호출(D/A)에서 IoU 미판독 자리만.
         # D 판독률이 오르면 D-가드(사망/관전 오독 방어)가 살아나 kill_shortfall류
         # FP(#120/#122 유형)를 정산 단계에서 차단할 수 있다.
@@ -227,13 +236,13 @@ def _read_digit_group(
             if isinstance(c_lab, int) and c_p >= _CNN_V2_MIN_PD:
                 d, sc = c_lab, min(0.85, c_p)
         if d is None:
-            return None, max(0.0, sc)
+            return None, max(0.0, sc), False
         digits.append(d)
         min_score = min(min_score, sc)
     val = 0
     for d in digits:
         val = val * 10 + d
-    return val, min_score
+    return val, min_score, False
 
 
 def _crop_ratio(img: np.ndarray, y: tuple[float, float], x: tuple[float, float]) -> np.ndarray:
@@ -312,14 +321,15 @@ def read_kda_triple_from_game(
     if glyphs is None:
         return None, None, None, 0.0, "row_miss"
     matcher = get_hud_digit_matcher()
-    k, kconf = _read_digit_group(glyphs.k, matcher, raw_patches=glyphs.k_raw)
+    k, kconf, k_cand = _read_digit_group(glyphs.k, matcher, raw_patches=glyphs.k_raw)
     if k is not None and not (0 <= k <= _MAX_CUM_K):
         k, kconf = None, 0.0
-    km = "template" if k is not None else "template_miss"
+    # R16: cnn8 후보는 값 없이 method로만 신호 — 승격은 hud_cnn8_promote 소관
+    km = "template" if k is not None else ("cnn8_cand" if k_cand else "template_miss")
     if template_only:
         return k, None, None, kconf, km
-    d, _ = _read_digit_group(glyphs.d, matcher)
-    a, _ = _read_digit_group(glyphs.a, matcher)
+    d, _dc, _ = _read_digit_group(glyphs.d, matcher)
+    a, _ac, _ = _read_digit_group(glyphs.a, matcher)
     return k, d, a, kconf, km
 
 

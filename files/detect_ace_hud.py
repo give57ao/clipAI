@@ -18,6 +18,7 @@ import cv2
 from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher
 from hud_kda import read_kda_triple_from_game
+from hud_cnn8_promote import promote_cnn8_reads
 from hud_round_settle import SettledRound, settle_rounds, _quarantine_zeros
 from hud_streak_salvage import apply_salvage, salvage_streak_aces
 
@@ -352,7 +353,7 @@ def _miss_gap_starts(reads: list[KRead], t_lo: float, t_hi: float) -> list[float
     for r in sorted(reads, key=lambda x: x.t):
         if not (t_lo < r.t < t_hi):
             continue
-        if r.method == "template_miss":
+        if r.method in ("template_miss", "cnn8_cand"):  # 미승격 cnn8 후보도 miss (R16)
             if not in_gap:
                 gaps.append(r.t)
                 in_gap = True
@@ -856,10 +857,17 @@ def timeline_from_reads(
         ace_kills=ace_kills,
     )
 
+    # R16: CNN-8 후보 승격 — 시간적 동의 + 체인 인접 불변식(직전 지지값 7/8) 통과분만
+    # k=8로 확정 (hud_cnn8_promote.py 모듈 주석 참고). 후보가 없으면(플래그 OFF·구
+    # 캐시) 완전 no-op. 미승격 후보는 아래 집계에서 miss로 센다.
+    n_cnn8 = promote_cnn8_reads(reads)
+    if n_cnn8:
+        timeline.warnings.append(f"cnn8_promoted_{n_cnn8}")
+
     for r in reads:
         if r.k is not None:
             timeline.k_template_hits += 1
-        elif r.method in ("template_miss", "triple_incomplete"):
+        elif r.method in ("template_miss", "triple_incomplete", "cnn8_cand"):
             timeline.k_template_miss += 1
         elif r.method == "row_miss":
             timeline.k_row_miss += 1

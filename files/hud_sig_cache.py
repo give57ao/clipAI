@@ -41,7 +41,8 @@ DEFAULT_VIDEOS = [
     r"E:\OBS\2026-03-24 02-34-09.mp4",
 ]
 
-_METHOD_CODE = {"template": "T", "template_miss": "M", "row_miss": "R", "triple_incomplete": "I"}
+_METHOD_CODE = {"template": "T", "template_miss": "M", "row_miss": "R", "triple_incomplete": "I",
+                "cnn8_cand": "C"}  # R16: CNN-8 후보(미승격) — hud_cnn8_promote.py 참고
 METHOD_DECODE = {v: k for k, v in _METHOD_CODE.items()}
 
 

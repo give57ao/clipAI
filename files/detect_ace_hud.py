@@ -51,6 +51,15 @@ _MAX_ACE_SPAN_SEC = 90.0   # 올킬 3킬은 한 라운드(≤90s) 내 (그 이�
 _MIN_ROUND_K_SAMPLES = 10  # 임계값 스윕 실측: 6~8보다 FP를 더 줄이면서 recall 손실 없음
 _STREAK_SALVAGE = True     # R13(2026-07-22): 킬 스트릭 구제 정산 — hud_streak_salvage.py.
                            # 승수(win) 채널이 있는 영상에서만 발동 (D1). 끄면 기존과 100% 동일.
+# R14(2026-07-23) 첫킬-인접 승리 게이트 상수 — 본문 주석(첫킬-인접 승리 게이트) 참고
+_WIN_NEAR_FIRSTKILL_PRE = 8.0   # 첫킬 앞쪽 win 탐색 폭 (실측 FP: -5.6~-5.1s)
+_WIN_NEAR_FIRSTKILL_POST = 6.0  # 첫킬 뒤쪽 상한 (TP 보호: 04-24 R7의 +9.8s는 밖)
+_WIN_OWN_LAG_MAX = 12.0         # 자기-승리 판독 지연 밴드 (실측 TP: ace-3.8~7.1s)
+_WIN_MERGE_MIN_SPAN = 25.0      # 기각에 필요한 최소 킬 폭(첫킬~ace). TP 보호 핵심:
+                                # 06-22 R8 TP(폭 20.9s)와 FP #110/#124(64.9/75.6s)가
+                                # 그 외 신호로는 완전 동형(gap스탬프×2 + 직전win -5s)
+                                # — 폭만이 유일한 분리축. #120(16.9s)은 이 선 아래라
+                                # 포기(아래 '한계' 주석의 #122와 함께 수정불가 FP로 분류)
 _KILL_GRACE_SEC = 10.0     # R2 Task 2: 경계 직후 킬이 이전 라운드 막판일 수 있는 최대 간격
 
 # R6(2026-07-13): 상단 스코어(팀 승수) 게이트 — 폭0(kill_times 전부 동일 시각)
@@ -902,6 +911,38 @@ def timeline_from_reads(
                 if n >= _SCORE_SPLIT_MIN_EVENTS:
                     r.ace = False
                     r.end_reason = "score_wins_split"
+
+    # R14 첫킬-인접 승리 게이트 (2026-07-23) — boundary_merge FP 사후검수 대응.
+    # 실측 지문 (사용자 육안 확정 FP 4건 + GT TP 14건 win 위치 전수 측정):
+    #   · 진짜 올킬: 3번째 킬 순간 승리 배너가 HUD를 가려 K=+3 판독이 늦어지므로
+    #     "자기 승리" win이 ace_sec보다 3.8~7.1s **앞에** 찍힌다 (14건 전부, 꽉 찬
+    #     클러스터). 즉 "win이 킬창 안에 있다"는 것만으론 FP 판별 불가 — 1차 시도
+    #     (첫킬+3 < win < ace-3 기각)는 TP 14건을 삼켜 즉시 폐기했다.
+    #   · boundary_merge FP: 직전 라운드의 win이 **첫 킬 판독의 -5.6~-5.1s**에
+    #     찍힌다 (합산된 킬 체인의 시작이 직전 라운드 끝에 붙어 있으므로). 진짜
+    #     플레이는 라운드 시작(스폰) 후 수 초 만에 킬이 불가능해 이 근접이 곧
+    #     "체인이 라운드 경계를 가로질렀다"는 증거다.
+    # 규칙: 첫킬 [-8s, +6s] 창에 win이 있고, 그 win이 자기-승리 지연 밴드
+    # (ace_sec-12s 이후)가 아니면 boundary_merge로 기각. +6s 상한은 gap-스탬프 킬
+    # (라운드 시작 시각으로 찍힘)과 직전 win의 t_hi 확정 지연이 겹치는 TP 보호
+    # (실측: 04-24 00-43-29 R7 TP는 win이 첫킬+9.8s — 상한 밖에서 생존).
+    # 한계: FP #122(06-25 R28)처럼 win이 첫킬-16.5s로 먼 케이스는 못 잡음(포기,
+    # 팀 단위 score 채널로는 팀원 킬로 끝난 라운드와 구분 불가).
+    if score_win_events:
+        for r in rounds:
+            if r.ace and r.first_kill_sec is not None and r.ace_sec is not None:
+                f, a = r.first_kill_sec, r.ace_sec
+                if a - f <= _WIN_MERGE_MIN_SPAN:
+                    continue  # 좁은 킬 폭 = 정상 올킬 범위 (상수 주석 참고)
+                hit = any(
+                    e.get("kind") == "win"
+                    and f - _WIN_NEAR_FIRSTKILL_PRE <= e.get("t_hi", -1e9) <= f + _WIN_NEAR_FIRSTKILL_POST
+                    and a - e.get("t_hi", -1e9) > _WIN_OWN_LAG_MAX
+                    for e in score_win_events
+                )
+                if hit:
+                    r.ace = False
+                    r.end_reason = "win_near_first_kill"
 
     # R13 스트릭 구제 (2026-07-22) — 미탐 71건 분석 대응 (hud_streak_salvage.py 모듈
     # 주석 참고). 킬 배너의 가짜 경계로 쪼개졌거나 지지 필터가 버린 +3 사다리를

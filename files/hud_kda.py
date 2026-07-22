@@ -26,6 +26,14 @@ _RED_WINS_X = (0.382, 0.458)
 _MID_ROUND_X = (0.462, 0.538)
 _BLUE_WINS_X = (0.542, 0.618)
 
+# R15(2026-07-23) v2 CNN 게이트 — 기본 OFF. 체인-감독 재학습 모델이
+# SONNET_TASK_DIGIT_CNN.md의 검증 게이트(TP 무손실 + FP 순증 0)를 통과한 뒤에만
+# True로 전환할 것. OFF면 기존 동작과 100% 동일 (R4 순손실 사고 재발 방지).
+_CNN_V2_EIGHT = False   # K 슬롯: 0/None 자리 8-증거
+_CNN_V2_D = False       # D/A 슬롯: 미판독 자리 CNN 폴백
+_CNN_V2_MIN_P8 = 0.92
+_CNN_V2_MIN_PD = 0.95
+
 _KDA_LINE_Y = (0.235, 0.305)
 _KDA_LINE_X = (0.055, 0.220)
 _KDA_LABEL_SKIP = 0.30
@@ -196,6 +204,24 @@ def _read_digit_group(
             # R8: '0' 또는 미판독 자리만 8-위상 프로브 (다른 확신 판독은 불변)
             if probe_eight_topology(raw_patches[gi]):
                 d, sc = 8, _EIGHT_PROBE_CONF
+        # R15(2026-07-23) v2 CNN 증거 — 체인-감독 데이터셋(_build_digit_dataset_v2.py)
+        # 재학습 모델 전용. R4와 동일하게 "0/None 자리 + 8만 채택" 스코프를 유지하되
+        # conf를 0.85로 캡: 정산의 지지 필터(_SUPPORT_SINGLE_CONF=0.88) 아래라
+        # 단발 스퓨리어스 8은 자동 탈락 = 시간적 상호확증(연속 2회+)이 공짜로 걸림.
+        # ⚠ 검증 게이트(SONNET_TASK_DIGIT_CNN.md §게이트) 통과 전엔 켜지 말 것.
+        if _CNN_V2_EIGHT and raw_patches is not None and (d is None or d == 0):
+            from hud_digit_match import match_glyph_cnn
+            c_lab, c_p = match_glyph_cnn(glyph)
+            if c_lab == 8 and c_p >= _CNN_V2_MIN_P8:
+                d, sc = 8, min(0.85, c_p)
+        # R15 D-슬롯 CNN 폴백 — raw_patches 없는 호출(D/A)에서 IoU 미판독 자리만.
+        # D 판독률이 오르면 D-가드(사망/관전 오독 방어)가 살아나 kill_shortfall류
+        # FP(#120/#122 유형)를 정산 단계에서 차단할 수 있다.
+        if _CNN_V2_D and raw_patches is None and d is None:
+            from hud_digit_match import match_glyph_cnn
+            c_lab, c_p = match_glyph_cnn(glyph)
+            if isinstance(c_lab, int) and c_p >= _CNN_V2_MIN_PD:
+                d, sc = c_lab, min(0.85, c_p)
         if d is None:
             return None, max(0.0, sc)
         digits.append(d)

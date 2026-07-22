@@ -162,11 +162,17 @@ T1~T3이 안정되면:
 | 2026-07-22 | T3 1차 스윕 (Sonnet, **재검증 필요**) | - | - | `files/_salvage_sweep.py` 작성, 72조합 스윕. ⚠ T1과 동시 실행되며 sig_cache가 스윕 도중 늘어나 일부 조합(step≥60) 결과가 오염됨(`2026-06-14 00-55-19`/`2026-06-16 00-55-18`이 스윕 중간에 새로 캐시돼 이후 조합에만 반영) — 그 결과의 "신규 FP"는 파라미터 때문인지 신규 영상 편입 때문인지 분리 불가. **신뢰 가능한 부분만**: step=40(모든 win/conf/stable 조합, 12건)은 베이스라인(step=50)과 완전 동일(탐지·FP 집합 100% 일치) — 더 좁혀도 손실도 이득도 없음. step≥60은 T1 완료 후 재스윕 필요. |
 
 ### T3 재검증 예정 메모
-T1(17영상 sig_cache, +score_cache 필요 — 아직 미착수) 완료 후:
-1. `python -u hud_sig_cache.py --videos ...` 완료 확인 (17/17)
-2. score_cache 생성 (T1 원 지시서 §2 T1 참고 — `scan_score_timeline()` 호출, 전용 CLI 없음.
-   `_salvage_sweep.py`처럼 인라인 드라이버 스크립트로 17개 stem 순회하며
-   `hud_score_wins.scan_score_timeline(f"E:/OBS/{stem}.mp4")` 호출할 것)
-3. `hud_boundary_verify.py --videos <17 stems>` 로 경계 CNN 검증(있으면 D4 정확도 향상)
-4. 위 3개가 안정된 뒤에만 `_salvage_sweep.py` 재실행 — 이번엔 동시 작업 없이 단독 실행할 것
-   (동시 실행 시 캐시 디렉터리가 스윕 도중 변하면 조합 간 비교가 무효화됨 — 위 오염 사례 참고)
+T1(17영상 sig_cache) — ✅ 완료(17/17). 이후 순서 (2026-07-22 오후, 사용자 외출로 무인 진행 승인받음):
+1. ~~`python -u hud_sig_cache.py --videos ...`~~ ✅ 완료 (17/17)
+2. score_cache 생성 — `files/_build_score_cache.py` 작성해 진행 중 (전용 CLI 없어 `scan_score_timeline()`
+   직접 호출하는 드라이버). 완료되는 대로 `hud_from_cache.py`+`_compare_hud_gt.py` 자동 체이닝
+   (백그라운드 스크립트로 걸어둠, `after_scorecache.log`)
+3. 이어서 `hud_boundary_verify.py --videos <17 stems>` 경계 CNN 검증 자동 체이닝
+4. 그 후 `_salvage_sweep.py` 단독 재실행 (동시작업 없음 — 오염 재발 방지)
+   전체 체인: `master_chain.log`에 순차 기록
+
+**⚠ T5(review_ledger.csv 재구축)는 이 자동 체인에 포함하지 않음** — verdict 손실/BOM 사고 전례가
+있어 사람 판단 없이 무인 실행하기엔 리스크가 큼. 위 1~4 끝나면 결과만 정리해두고, 실제 재구축은
+사용자 복귀 후 진행.
+**T4(GT 외 신규 탐지)도 자동 반영 금지** — 새 탐지 나오면 클립만 뽑아 `_검수중`에 큐잉하고
+`gt_aces.json` 커밋은 사용자 육안 확인 후에만.

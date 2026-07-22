@@ -29,8 +29,10 @@ _BLUE_WINS_X = (0.542, 0.618)
 # R15(2026-07-23) v2 CNN 게이트 — 기본 OFF. 체인-감독 재학습 모델이
 # SONNET_TASK_DIGIT_CNN.md의 검증 게이트(TP 무손실 + FP 순증 0)를 통과한 뒤에만
 # True로 전환할 것. OFF면 기존 동작과 100% 동일 (R4 순손실 사고 재발 방지).
-_CNN_V2_EIGHT = True    # K 슬롯: 0/None 자리 8-증거 — T3 게이트 통과(0→8 오발 0%, n=372)
-                        # 2026-07-23 Sonnet: 파일럿 재스캔 검증 진행 중
+_CNN_V2_EIGHT = False   # K 슬롯: 0/None 자리 8-증거 — 2026-07-23 파일럿 재스캔에서
+                        # TP 1건 손실 + FP 2건 신규(둘 다 폭0 패턴) 확인돼 롤백.
+                        # SONNET_TASK_DIGIT_CNN.md T4 실패 기록 참고 — 재활성 전
+                        # 원인(폭0 스탬프 오염 의심) 해소 필요
 _CNN_V2_D = False       # D/A 슬롯: 미판독 자리 CNN 폴백 — 게이트 보류(SONNET_TASK_DIGIT_CNN.md
                         # T3 기록 참고: 위험한 오분류는 0건이나 공식 기준(99%) 미달로 대기)
 _CNN_V2_MIN_P8 = 0.92

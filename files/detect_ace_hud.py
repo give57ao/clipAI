@@ -18,7 +18,8 @@ import cv2
 from game_frame import extract_game_crop_bgr
 from hud_digit_match import get_hud_digit_matcher
 from hud_kda import read_kda_triple_from_game
-from hud_round_settle import SettledRound, settle_rounds
+from hud_round_settle import SettledRound, settle_rounds, _quarantine_zeros
+from hud_streak_salvage import apply_salvage, salvage_streak_aces
 
 DEFAULT_DATASET_ROOT = Path(r"E:\Highlights\ml_dataset")
 DEFAULT_OUTPUT_DIR = Path(r"E:\clipai_result\ace_clips_hud")
@@ -48,6 +49,8 @@ _MAX_ACE_SPAN_SEC = 90.0   # 올킬 3킬은 한 라운드(≤90s) 내 (그 이�
 # 22초 라운드에 K 판독 성공 단 1건, 그마저 3만큼 뛴 값). 라운드 내 K 판독 성공 총
 # 횟수가 너무 적으면(경계 오검출로 잘려나온 가짜 라운드일 위험) ace 제외.
 _MIN_ROUND_K_SAMPLES = 10  # 임계값 스윕 실측: 6~8보다 FP를 더 줄이면서 recall 손실 없음
+_STREAK_SALVAGE = True     # R13(2026-07-22): 킬 스트릭 구제 정산 — hud_streak_salvage.py.
+                           # 승수(win) 채널이 있는 영상에서만 발동 (D1). 끄면 기존과 100% 동일.
 _KILL_GRACE_SEC = 10.0     # R2 Task 2: 경계 직후 킬이 이전 라운드 막판일 수 있는 최대 간격
 
 # R6(2026-07-13): 상단 스코어(팀 승수) 게이트 — 폭0(kill_times 전부 동일 시각)
@@ -101,6 +104,7 @@ class RoundTrack:
     end_reason: str = "hud_elim"
     first_kill_sec: float | None = None
     ace_sec: float | None = None
+    salvage: str = ""  # R13 스트릭 구제로 ace가 된 경우 채택 근거 (hud_streak_salvage.py)
 
 
 @dataclass
@@ -852,9 +856,14 @@ def timeline_from_reads(
             timeline.k_row_miss += 1
 
     boundaries: list[float] = []   # 라운드 경계 시각 (연속 row_miss run 중앙)
+    # R13: 경계별 '강도' — CNN 전광판 확인 or 승수 인접이면 강한(진짜) 경계.
+    # 스트릭 구제(hud_streak_salvage)가 "약한 경계는 무시, 강한 경계는 스트릭 차단"
+    # 판단에 사용. R10 안전핀으로 무검증 통과한 경계가 전형적인 '약한' 경계다.
+    boundary_strength: list[tuple[float, bool]] = []
     _win_gate_active = boundary_score_gate and bool(score_win_events)  # R10: 기본 활성(2026-07-17, 위 docstring 참고)
     _prev_win_rejected = False   # R10 안전핀: 연쇄 병합 방지(아래 주석 참고)
     for (start, last, _n) in rowmiss_runs(reads):
+        verdict = None
         if boundary_verdicts is not None:
             verdict = _lookup_boundary_verdict(boundary_verdicts, start, last)
             if verdict is False:
@@ -873,6 +882,11 @@ def timeline_from_reads(
             continue  # R10: 근방에 승수 증가 없음 — 가짜 경계(탭 등) — 폐기, 두 라운드 병합
         _prev_win_rejected = False
         boundaries.append(mid)
+        boundary_strength.append((
+            mid,
+            verdict is True
+            or (bool(score_win_events) and _has_nearby_win_event(score_win_events, mid)),
+        ))
 
     settled = settle_rounds(
         [(r.t, r.k, r.conf) for r in reads], boundaries, duration,
@@ -888,6 +902,22 @@ def timeline_from_reads(
                 if n >= _SCORE_SPLIT_MIN_EVENTS:
                     r.ace = False
                     r.end_reason = "score_wins_split"
+
+    # R13 스트릭 구제 (2026-07-22) — 미탐 71건 분석 대응 (hud_streak_salvage.py 모듈
+    # 주석 참고). 킬 배너의 가짜 경계로 쪼개졌거나 지지 필터가 버린 +3 사다리를
+    # 원시 판독에서 직접 복원. 승수 채널 없으면 D1에 의해 자동 침묵.
+    if _STREAK_SALVAGE and score_win_events:
+        k_clean = _quarantine_zeros(
+            [(r.t, r.k, r.conf) for r in reads if r.k is not None]
+        )
+        recs = salvage_streak_aces(
+            k_clean, rounds, boundary_strength, score_win_events,
+            [(r.t, r.d, r.conf) for r in reads if r.d is not None],
+            ace_kills=ace_kills,
+        )
+        n_salv = apply_salvage(rounds, recs)
+        if n_salv:
+            timeline.warnings.append(f"streak_salvage_{n_salv}")
 
     timeline.rounds = rounds
     timeline.hud_end_count = len(boundaries)

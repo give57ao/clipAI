@@ -28,7 +28,11 @@ from __future__ import annotations
 import json
 import random
 import re
+import sys
 from pathlib import Path
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
 
 import cv2
 import numpy as np
@@ -39,16 +43,24 @@ from torch.utils.data import DataLoader, Dataset
 
 RAW_DIR = Path(r"E:\clipai_result\hud_templates_harvest\raw")
 CNN_DATASET_DIR = Path(r"E:\clipai_result\hud_templates_harvest\cnn_dataset")
+CNN_DATASET_V2_DIR = Path(r"E:\clipai_result\hud_templates_harvest\cnn_dataset_v2")
 EIGHT_TARGETED_DIR = Path(r"E:\clipai_result\hud_templates_harvest\eight_targeted")
 REMOVED_8_DIR = Path(__file__).parent / "hud_templates" / "_removed_8"
 MODEL_DIR = Path(r"E:\Highlights\ml_dataset\models")
-MODEL_PATH = MODEL_DIR / "hud_digit_clf_best.pt"
-META_PATH = MODEL_DIR / "hud_digit_clf_meta.json"
+# R15(2026-07-23): v2(체인-감독 재학습)는 별도 파일로 저장 — v1은 롤백용으로 보존.
+# SONNET_TASK_DIGIT_CNN.md 게이트 통과 전엔 hud_digit_match._CNN_MODEL_PATH를
+# 이 파일로 전환하지 말 것.
+MODEL_PATH = MODEL_DIR / "hud_digit_clf_v2_best.pt"
+META_PATH = MODEL_DIR / "hud_digit_clf_v2_meta.json"
 
 CLASSES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "junk"]
 LABEL_TO_IDX = {lab: i for i, lab in enumerate(CLASSES)}
 
-VAL_STEMS = {"2026-03-22 03-02-03", "2026-03-24 02-34-09"}
+# v1 val은 3월 2영상뿐 — v2는 6월 영상 2개를 추가해 최근 배경/해상도 드리프트를 검증에 반영
+VAL_STEMS = {
+    "2026-03-22 03-02-03", "2026-03-24 02-34-09",
+    "2026-06-16 00-55-18", "2026-06-24 01-55-38",
+}
 _STEM_RE = re.compile(r"^(.*)_\d+s_[a-z]\d+\.png$")
 
 
@@ -64,10 +76,16 @@ def load_image(path: Path) -> np.ndarray | None:
     return img
 
 
-def build_samples() -> tuple[list[tuple[Path, int, str]], list[tuple[Path, int, str]]]:
-    """반환: (train_samples, val_samples) — 각 원소 (경로, label_idx, video_stem)."""
-    train: list[tuple[Path, int, str]] = []
-    val: list[tuple[Path, int, str]] = []
+def build_samples() -> tuple[list[tuple[Path, int, str, str]], list[tuple[Path, int, str, str]]]:
+    """반환: (train_samples, val_samples) — 각 원소 (경로, label_idx, video_stem, origin).
+
+    origin: 'v1_claimed'|'v1_junk'|'v1_eight_seed' (기존 템플릿-순환 라벨) |
+            'v2_claimed'|'v2_hardneg'|'v2_eight'|'v2_junk' (신규 체인-감독 라벨,
+            R15 — `_build_digit_dataset_v2.py`). T3 게이트 리포트에서 origin별로
+            분리 집계해 v2(특히 hardneg/eight)가 실제로 기여하는지 확인할 것.
+    """
+    train: list[tuple[Path, int, str, str]] = []
+    val: list[tuple[Path, int, str, str]] = []
 
     claimed = json.loads((CNN_DATASET_DIR / "claimed.json").read_text(encoding="utf-8"))
     for digit_s, names in claimed.items():
@@ -76,7 +94,7 @@ def build_samples() -> tuple[list[tuple[Path, int, str]], list[tuple[Path, int, 
         for name in names:
             stem = stem_of(name) or "?"
             p = RAW_DIR / name
-            row = (p, idx, stem)
+            row = (p, idx, stem, "v1_claimed")
             (val if stem in VAL_STEMS else train).append(row)
 
     uclusters = json.loads(
@@ -88,20 +106,47 @@ def build_samples() -> tuple[list[tuple[Path, int, str]], list[tuple[Path, int, 
     for name in uclusters["u02"]["members"]:
         stem = stem_of(name) or "?"
         p = RAW_DIR / name
-        row = (p, junk_idx, stem)
+        row = (p, junk_idx, stem, "v1_junk")
         (val if stem in VAL_STEMS else train).append(row)
 
     eight_idx = LABEL_TO_IDX[8]
     for p in sorted(EIGHT_TARGETED_DIR.glob("0040_4200_*.png"))[2:35]:
-        train.append((p, eight_idx, "2026-03-21 00-40-56"))  # 전량 train (표본 부족)
+        train.append((p, eight_idx, "2026-03-21 00-40-56", "v1_eight_seed"))  # 전량 train (표본 부족)
     for p in REMOVED_8_DIR.glob("k_8*.png"):
-        train.append((p, eight_idx, "_seed"))
+        train.append((p, eight_idx, "_seed", "v1_eight_seed"))
+
+    # R15 v2 — cnn_dataset_v2/<label>/<stem>_<t>s_<slot><gi>.png
+    # <label>은 "0".."9"(claimed, K/D 슬롯 통합) | "hardneg_0".."hardneg_9" | "junk"
+    if CNN_DATASET_V2_DIR.is_dir():
+        for d in sorted(CNN_DATASET_V2_DIR.iterdir()):
+            if not d.is_dir():
+                continue
+            name = d.name
+            if name == "junk":
+                # QC 결과(2026-07-23 Sonnet) — 이 폴더는 "안정런 밖 template_miss"
+                # 기준이라 실제로는 멀쩡히 읽히는 숫자(빠른 킬스트릭 중 값이 순식간에
+                # 바뀌어 4프레임 안정을 못 채운 정상 프레임)를 대량 오염시킴. 파일
+                # 단위 정리로 해결 불가(폴더 전체가 구조적으로 잘못됨) — 하베스터
+                # 로직 재설계 필요(Fable 보고, SONNET_TASK_DIGIT_CNN.md 진행기록
+                # 참고). 재설계 전까지 전량 스킵, v1 junk만 사용.
+                continue
+            elif name.startswith("hardneg_"):
+                digit = int(name.split("_", 1)[1])
+                idx, origin = LABEL_TO_IDX[digit], "v2_hardneg"
+            else:
+                digit = int(name)
+                idx = LABEL_TO_IDX[digit]
+                origin = "v2_eight" if digit == 8 else "v2_claimed"
+            for p in d.glob("*.png"):
+                stem = stem_of(p.name) or "?"
+                row = (p, idx, stem, origin)
+                (val if stem in VAL_STEMS else train).append(row)
 
     return train, val
 
 
 class GlyphDataset(Dataset):
-    def __init__(self, samples: list[tuple[Path, int, str]], augment: bool):
+    def __init__(self, samples: list[tuple[Path, int, str, str]], augment: bool):
         self.samples = samples
         self.augment = augment
 
@@ -109,7 +154,7 @@ class GlyphDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, i: int):
-        p, label, _stem = self.samples[i]
+        p, label, _stem, _origin = self.samples[i]
         img = load_image(p)
         if img is None:
             img = np.zeros((32, 24), dtype=np.uint8)
@@ -170,15 +215,48 @@ def evaluate(model: nn.Module, samples, device) -> tuple[float, dict[str, tuple[
     return correct / total, by_label
 
 
+def evaluate_by_origin(model: nn.Module, samples, device) -> dict[str, tuple[int, int]]:
+    """origin별(v1_*/v2_claimed/v2_hardneg/v2_eight/v2_junk) 정확도 — T2 보고 요건.
+
+    hardneg/eight는 R4를 죽인 바로 그 표본군이라 이 숫자가 핵심 증거다.
+    """
+    if not samples:
+        return {}
+    ds = GlyphDataset(samples, augment=False)
+    loader = DataLoader(ds, batch_size=128, shuffle=False)
+    origins = [s[3] for s in samples]
+    model.eval()
+    per_origin: dict[str, list[int]] = {}
+    i = 0
+    with torch.no_grad():
+        for x, y in loader:
+            bs = x.size(0)
+            x, y = x.to(device), y.to(device)
+            pred = model(x).argmax(1)
+            for j in range(bs):
+                o = origins[i + j]
+                c = per_origin.setdefault(o, [0, 0])
+                c[1] += 1
+                if pred[j].item() == y[j].item():
+                    c[0] += 1
+            i += bs
+    return {k: tuple(v) for k, v in sorted(per_origin.items())}
+
+
 def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_samples, val_samples = build_samples()
     print(f"[train] train={len(train_samples)} val={len(val_samples)}")
 
     counts: dict[int, int] = {}
-    for _p, lab, _s in train_samples:
+    for _p, lab, _s, _o in train_samples:
         counts[lab] = counts.get(lab, 0) + 1
     print("[train] train class counts:", {str(CLASSES[k]): v for k, v in sorted(counts.items())})
+
+    origin_counts: dict[str, int] = {}
+    for _p, _lab, _s, o in train_samples + val_samples:
+        origin_counts[o] = origin_counts.get(o, 0) + 1
+    print("[train] origin counts (train+val):", dict(sorted(origin_counts.items())))
 
     # 클래스 불균형 보정 — inverse-frequency 가중치 (8·6·9처럼 표본 적은 클래스 보호)
     weights = torch.tensor(
@@ -226,6 +304,11 @@ def main() -> int:
     print("[train] val per-class:", val_by_label)
     print("[train] train per-class:", train_by_label)
 
+    val_by_origin = evaluate_by_origin(model, val_samples, device)
+    train_by_origin = evaluate_by_origin(model, train_samples, device)
+    print("[train] val per-origin (T2 게이트 근거 — hardneg/eight 필수 확인):", val_by_origin)
+    print("[train] train per-origin:", train_by_origin)
+
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), MODEL_PATH)
     META_PATH.write_text(
@@ -236,7 +319,10 @@ def main() -> int:
                 "val_acc": val_acc,
                 "train_acc": train_acc,
                 "val_stems": sorted(VAL_STEMS),
-                "note": "8클래스는 val 분리 없이 전량 train (표본 36개, 단일 영상 출처)",
+                "val_by_origin": {k: list(v) for k, v in val_by_origin.items()},
+                "note": "R15 v2 — 체인-감독 라벨(v2_claimed/hardneg/eight/junk) + v1 유지. "
+                        "게이트 통과 전 hud_digit_match._CNN_MODEL_PATH 전환 금지 "
+                        "(SONNET_TASK_DIGIT_CNN.md §3 오프라인 게이트).",
             },
             ensure_ascii=False,
             indent=2,

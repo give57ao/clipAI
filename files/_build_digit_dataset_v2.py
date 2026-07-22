@@ -224,8 +224,8 @@ def harvest_stem(stem: str) -> dict[str, int]:
         ok, frame = cap.read()
         if not ok or frame is None:
             continue
-        game = extract_game_crop_bgr(frame)
-        if game is None:
+        game, _box = extract_game_crop_bgr(frame)
+        if game is None or game.size == 0:
             continue
         glyphs = locate_kda_glyphs(game)
         if glyphs is None:

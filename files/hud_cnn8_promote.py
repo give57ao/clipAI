@@ -67,17 +67,25 @@ def _last_supported_value(reads: list, i: int) -> int | None:
     return None
 
 
-def promote_cnn8_reads(reads: list) -> int:
+def promote_cnn8_reads(reads: list) -> set[float]:
     """method=='cnn8_cand' 후보를 조건 통과 시 k=8 판독으로 승격 (제자리 수정).
 
     reads: KRead 리스트 (t 오름차순 가정 — collect_reads/캐시 로드 순서 그대로).
-    반환: 승격 수. 후보가 없으면(구 캐시·플래그 OFF) 0 — 완전 no-op.
+    반환: 승격된 프레임의 t 집합 (빈 집합이면 완전 no-op — 구 캐시·플래그 OFF).
+
+    R17(2026-07-23, 확대 재스캔 회귀 조사 결과 반영): 반환값을 개수에서 t
+    집합으로 바꿈 — 호출부(detect_ace_hud.py)가 이 집합을 `settle_rounds`에
+    `promoted_ts`로 넘겨 k_samples(신뢰도) 집계에서 제외시키는 데 쓴다.
+    이유: 승격 자체(값 확정)는 믿지만, 그 확정이 라운드 전체의 "표본이
+    충분하다"는 별개의 신뢰도 판단에 이중으로 쓰이면 원래 표본부족으로
+    걸러지던 폭0 저신뢰 오탐이 통과해버림(2026-05-23 02-14-52 R4 실측:
+    k_samples 5→29로 승격만으로 뛰어 게이트 통과, FABLE_HANDOFF.md 참고).
     """
     cand_idx = [i for i, r in enumerate(reads) if r.method == CAND_METHOD]
     if not cand_idx:
-        return 0
+        return set()
     cand_times = [reads[i].t for i in cand_idx]
-    n_promoted = 0
+    promoted: set[float] = set()
     for pos, i in enumerate(cand_idx):
         t = reads[i].t
         # (i) 시간적 동의 — 인접 후보 존재 (자기 제외)
@@ -95,8 +103,8 @@ def promote_cnn8_reads(reads: list) -> int:
         r.k = 8
         r.conf = _PROMOTE_CONF
         r.method = "template"
-        n_promoted += 1
-    return n_promoted
+        promoted.add(t)
+    return promoted
 
 
 # ---------------------------------------------------------------------------
@@ -126,38 +134,39 @@ def _selftest() -> None:
     #    시간적 동의(i)는 통과하지만 직전 지지값 5 → (ii)에서 전원 기각.
     reads = [T(440 + i * 0.5, 5) for i in range(16)] + [M(448.5), M(449.0)] \
         + [C(450.0), C(450.5), C(450.75)] + [M(451.5)]
-    assert promote_cnn8_reads(reads) == 0
+    assert len(promote_cnn8_reads(reads)) == 0
     assert all(r.k is None for r in reads if r.method == CAND_METHOD)
 
     # ② 정탐 목표(7→8 크로싱, 02-21-23 79:51 유형) — 7 지지 후 후보 쌍 → 승격.
     reads = [T(10 + i, 7) for i in range(5)] + [M(15.5)] + [C(16.0), C(16.5), C(17.0)]
-    assert promote_cnn8_reads(reads) == 3
+    promoted = promote_cnn8_reads(reads)
+    assert promoted == {16.0, 16.5, 17.0}, promoted
     assert all(r.k == 8 and r.method == "template" and r.conf == _PROMOTE_CONF
                for r in reads[-3:])
 
     # ③ 고립 단발 — 7 지지라도 (i) 미충족 → 기각.
     reads = [T(10 + i, 7) for i in range(5)] + [C(20.0)]
-    assert promote_cnn8_reads(reads) == 0
+    assert len(promote_cnn8_reads(reads)) == 0
 
     # ④ 직전 그룹이 고립 오독(5 단발 저신뢰)이어도 그 앞의 지지된 7을 채택 → 승격.
     reads = [T(10 + i, 7) for i in range(5)] + [T(15.5, 5, 0.6)] + [C(16.5), C(17.0)]
-    assert promote_cnn8_reads(reads) == 2
+    assert len(promote_cnn8_reads(reads)) == 2
 
     # ⑤ 단발이라도 고신뢰(0.9) 7이면 지지 인정 → 승격.
     reads = [T(10.0, 7, 0.9)] + [C(11.0), C(11.5)]
-    assert promote_cnn8_reads(reads) == 2
+    assert len(promote_cnn8_reads(reads)) == 2
 
     # ⑥ 8 유지(이미 8 확립 후 재관측) — prev=8 허용 → 승격.
     reads = [T(10 + i, 8) for i in range(3)] + [M(13.5)] + [C(14.0), C(14.5)]
-    assert promote_cnn8_reads(reads) == 2
+    assert len(promote_cnn8_reads(reads)) == 2
 
     # ⑦ 룩백 밖의 7(200초 전)은 무효 → 기각.
     reads = [T(10 + i, 7) for i in range(5)] + [C(200.0), C(200.5)]
-    assert promote_cnn8_reads(reads) == 0
+    assert len(promote_cnn8_reads(reads)) == 0
 
     # ⑧ 후보 없음(구 캐시/플래그 OFF) → no-op.
     reads = [T(10, 5), M(11)]
-    assert promote_cnn8_reads(reads) == 0
+    assert len(promote_cnn8_reads(reads)) == 0
 
     print("hud_cnn8_promote selftest: 8/8 OK")
 

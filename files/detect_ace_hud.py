@@ -860,9 +860,11 @@ def timeline_from_reads(
     # R16: CNN-8 후보 승격 — 시간적 동의 + 체인 인접 불변식(직전 지지값 7/8) 통과분만
     # k=8로 확정 (hud_cnn8_promote.py 모듈 주석 참고). 후보가 없으면(플래그 OFF·구
     # 캐시) 완전 no-op. 미승격 후보는 아래 집계에서 miss로 센다.
-    n_cnn8 = promote_cnn8_reads(reads)
-    if n_cnn8:
-        timeline.warnings.append(f"cnn8_promoted_{n_cnn8}")
+    # R17: 승격 시각 집합을 settle_rounds에 넘겨 k_samples(신뢰도) 집계에서 제외
+    # (승격만으로 표본부족 게이트를 우회하는 사고 방지 — hud_round_settle.py 참고).
+    promoted_ts = promote_cnn8_reads(reads)
+    if promoted_ts:
+        timeline.warnings.append(f"cnn8_promoted_{len(promoted_ts)}")
 
     for r in reads:
         if r.k is not None:
@@ -909,6 +911,7 @@ def timeline_from_reads(
         [(r.t, r.k, r.conf) for r in reads], boundaries, duration,
         # D(데스) 채널 — 사후킬/관전 가드용 (2026-07-09). 구 캐시엔 d=None → 가드 no-op.
         d_reads=[(r.t, r.d, r.conf) for r in reads if r.d is not None],
+        promoted_ts=frozenset(promoted_ts),
     )
     rounds, kill_events, reset_events = _rounds_from_settled(settled, ace_kills)
 

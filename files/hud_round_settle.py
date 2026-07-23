@@ -279,6 +279,7 @@ def settle_rounds(
     boundaries: list[float],
     duration: float,
     d_reads: list[tuple[float, int, float]] | None = None,
+    promoted_ts: frozenset[float] = frozenset(),
 ) -> list[SettledRound]:
     """세그먼트별 독립 정산 + k_base 이월 + 경계 그레이스 귀속.
 
@@ -286,6 +287,13 @@ def settle_rounds(
     boundaries: 라운드 경계 시각 (row_miss run 중앙, CNN 검증 반영 후) — 정렬 가정 안 함.
     d_reads: (t, d, conf) — D(데스) 슬롯 판독 (d=None 제외 후 전달). None/빈 리스트면
              D-가드 완전 비활성 (구 캐시 하위호환 — 기존 동작과 100% 동일).
+    promoted_ts (R17, 2026-07-23): CNN-8 승격 프레임의 시각 집합
+        (`hud_cnn8_promote.promote_cnn8_reads`가 반환). 체인/gap-stamp 값 결정에는
+        정상 참여시키되 **k_samples(신뢰도 지표) 집계에서는 제외** — 승격 자체는
+        믿지만 그 확정이 "표본이 충분하다"는 별개의 신뢰도 판단에 이중으로 쓰이면
+        원래 표본부족(G5 미달)으로 걸러지던 폭0 저신뢰 오탐이 통과해버림(실측:
+        2026-05-23 02-14-52 R4, 승격만으로 k_samples 5→29 뛰어 게이트 통과 —
+        FABLE_HANDOFF.md R16 정정판 참고). 빈 집합(기본값)이면 기존 동작과 100% 동일.
     """
     seps = sorted(set(b for b in boundaries if 0.0 < b < duration))
     segs: list[tuple[float, float]] = []
@@ -309,7 +317,10 @@ def settle_rounds(
         # k_samples는 정의상 "필터 전 원시 기준"(G5 지표) — 격리 전 개수로 센다.
         # 격리 후 개수로 세면 G5(>=10) 임계가 기존 캘리브와 어긋남 (실측: 00-40-56
         # R83 65:01 TP가 k_samples 10→9로 떨어져 G5에 기각되는 회귀).
-        r.k_samples = sum(1 for (t, _k, _c) in ok_reads if s <= t < e)
+        # R17: 승격 프레임(promoted_ts)은 이 신뢰도 집계에서 제외 (상단 docstring 참고).
+        r.k_samples = sum(
+            1 for (t, _k, _c) in ok_reads if s <= t < e and t not in promoted_ts
+        )
         # ⚠ 시도했으나 순손실로 되돌림 (2026-07-07 Sonnet R3):
         # "carry_k 확립 시 0<obs_k<carry_k 관측은 항상 오독"이라는 강한 불변식을
         # 걸어봤으나(02-21-23 80:37 등 폭0 FP 다수 제거에는 성공) 02-21-23 64:54-65:20·
@@ -673,7 +684,19 @@ def _selftest() -> None:
     rs = settle_rounds(reads15b, [120.0], 170.0)
     assert rs[1].kills == 2, f"case15b 경계후 관측은 미발동: {rs[1]}"
 
-    print("hud_round_settle selftest: 19/19 OK")
+    # ⑯ R17 — CNN-8 승격 프레임은 k_samples(신뢰도) 집계에서 제외돼야 함
+    #    (2026-05-23 02-14-52 R4 실측: 승격만으로 k_samples 5→29 뛰어 G5 통과,
+    #    FABLE_HANDOFF.md R16 정정판 참고). 원시 판독 5개뿐인 폭0에 승격 24개를
+    #    더해도 promoted_ts로 넘기면 k_samples는 원시 5만 반영해야 한다.
+    reads16 = _fx((10.0, 3, 0.7, 5, 1.0))  # 폭0 저신뢰 라운드: 원시 판독 5개(10~14s)뿐
+    promoted16 = frozenset(30.0 + i * 0.25 for i in range(24))  # 승격 24개(30~35.75s, 겹치지 않게)
+    reads16_all = sorted(reads16 + [(t, 3, 0.85) for t in promoted16])
+    rs = settle_rounds(reads16_all, [], 60.0, promoted_ts=promoted16)
+    assert rs[0].k_samples == 5, f"case16 승격분 제외: {rs[0]}"  # 29가 아니라 5여야 함
+    rs_no_promo = settle_rounds(reads16_all, [], 60.0)  # promoted_ts 생략 시 기존 동작(전부 카운트)
+    assert rs_no_promo[0].k_samples == 29, f"case16 기본값(하위호환): {rs_no_promo[0]}"
+
+    print("hud_round_settle selftest: 20/20 OK")
 
 
 if __name__ == "__main__":

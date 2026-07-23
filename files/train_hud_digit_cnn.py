@@ -129,13 +129,10 @@ def build_samples() -> tuple[list[tuple[Path, int, str, str]], list[tuple[Path, 
                 continue
             name = d.name
             if name == "junk":
-                # QC 결과(2026-07-23 Sonnet) — 이 폴더는 "안정런 밖 template_miss"
-                # 기준이라 실제로는 멀쩡히 읽히는 숫자(빠른 킬스트릭 중 값이 순식간에
-                # 바뀌어 4프레임 안정을 못 채운 정상 프레임)를 대량 오염시킴. 파일
-                # 단위 정리로 해결 불가(폴더 전체가 구조적으로 잘못됨) — 하베스터
-                # 로직 재설계 필요(Fable 보고, SONNET_TASK_DIGIT_CNN.md 진행기록
-                # 참고). 재설계 전까지 전량 스킵, v1 junk만 사용.
-                continue
+                # R16(2026-07-23 Fable): _build_digit_dataset_v2._is_true_junk로
+                # 재정의됨(형태 기준 — 모든 숫자 템플릿과 IoU<0.35) 후 S1 재수확
+                # 완료. 구 기준("안정런 밖 miss")의 오염 문제 해소 확인 후 복원.
+                idx, origin = LABEL_TO_IDX["junk"], "v2_junk"
             elif name.startswith("hardneg_"):
                 digit = int(name.split("_", 1)[1])
                 idx, origin = LABEL_TO_IDX[digit], "v2_hardneg"

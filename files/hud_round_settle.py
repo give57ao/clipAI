@@ -330,6 +330,26 @@ def settle_rounds(
         # 하드 불변식으로는 막을 수 없음. 재시도하려면 "몇 프레임 이상 지속" 등
         # 추가 조건으로 노이즈와 정당한 보정을 구분해야 함 — 다음 세션 과제로 이월.
         chain, used_reset = _best_chain(_supported_obs(obs))
+        # R18(2026-07-23): 세그먼트 선두의 '순수 재확인' 승격 판독(값==carry_k)을
+        # 체인에서 제거. 원래 암전이던 라운드에 CNN이 carry 값을 그대로 재확인해
+        # 넣으면 k_start가 carry_k로 고정돼 (a) 원래 직전 라운드로 grace/gap 귀속되던
+        # 킬이 막히거나(2026-04-08 03-23-57 R68→R69 삼중 분할, TP 손실) (b) 암전
+        # 세그먼트가 '체인 있는' 것으로 바뀌어 DARK_GAP_GUARD가 무력화됨(2026-04-28
+        # 23-17-41 R84 폭0 가짜 3킬, FP). 두 실패 모두 "승격이 carry를 넘겨 진행하지
+        # 않고 재확인만 하는데도 라운드 귀속을 바꾸는" 동일 원리 → 선두 재확인분만
+        # 잘라 원래(승격 없던) 귀속을 복원한다. 값>carry_k인 진짜 8-크로싱(recall
+        # 목적)은 건드리지 않는다. selftest ⑯·⑰ 참고.
+        if promoted_ts and carry_k is not None:
+            cut = 0
+            for (t, k, _c) in chain:
+                if t in promoted_ts and k == carry_k:
+                    cut += 1
+                else:
+                    break
+            if cut:
+                chain = chain[cut:]
+                if not chain:
+                    used_reset = False
         r.chain_reads = len(chain)
         r.reset = used_reset
 
@@ -696,7 +716,34 @@ def _selftest() -> None:
     rs_no_promo = settle_rounds(reads16_all, [], 60.0)  # promoted_ts 생략 시 기존 동작(전부 카운트)
     assert rs_no_promo[0].k_samples == 29, f"case16 기본값(하위호환): {rs_no_promo[0]}"
 
-    print("hud_round_settle selftest: 20/20 OK")
+    # ⑰ R18 — 순수 승격 재확인 세그먼트는 carry_seg를 전진시키지 않아야 함
+    #    (2026-04-28 23-17-41 R84 실측: 원래 암전이던 중간 라운드를 CNN이 승격 8로
+    #    채우자 carry_seg가 밀려 DARK_GAP_GUARD 무력화 → 다음 라운드 폭0 가짜 3킬).
+    #    구조: segA(진짜 8 안정) → segB(승격 8만, carry 재확인) → segC(10→11).
+    #    segB가 dark로 취급돼야 segC에서 gap(8→10=2)이 암전귀속포기로 소거되고
+    #    segC는 10→11 킬 1개만 남는다(ace 아님).
+    readsA = _fx((10.0, 8, 0.9, 8, 1.0))                    # segA: 진짜 K=8 안정 (~17s)
+    promoted17 = frozenset(45.0 + i * 0.5 for i in range(10))  # segB: 승격 8만 (45~49.5s)
+    readsC = _fx((90.0, 10, 0.7, 8, 1.0), (100.0, 11, 0.9, 5, 1.0))  # segC: 10 안정 → 11
+    reads17 = sorted(readsA + [(t, 8, 0.85) for t in promoted17] + readsC)
+    # 경계: segA|segB(40s), segB|segC(70s) — segB는 45~49.5s라 가운데 세그먼트
+    rs = settle_rounds(reads17, [40.0, 70.0], 120.0, promoted_ts=promoted17)
+    segC = rs[-1]
+    assert segC.kills == 1 and segC.gap_unattributed == 2, f"case17 승격재확인 dark유지: {segC}"
+    # 대조: promoted_ts 없이(=구 동작) 돌리면 carry_seg가 segB로 전진해 가짜 3킬
+    rs_bug = settle_rounds(reads17, [40.0, 70.0], 120.0)
+    assert rs_bug[-1].kills == 3, f"case17 대조(구버그 재현): {rs_bug[-1]}"
+
+    # ⑱ R18 recall 보존 — 승격 8이 체인 '끝'에서 브리지 역할(진짜 3번째 킬)이면
+    #    선두 스트립(값==carry_k인 앞부분만 제거)은 이를 건드리지 않아 올킬 유지.
+    #    (R16이 의도한 recall 회복 경로 — 5→6→7 실판독 후 미판독 8을 승격으로 완성.)
+    readsG = _fx((10.0, 5, 0.9, 4, 1.0), (14.0, 6, 0.9, 4, 1.0), (18.0, 7, 0.9, 4, 1.0))
+    promoted18 = frozenset([22.0, 22.5, 23.0])               # 끝의 8-브리지(3번째 킬)
+    reads18 = sorted(readsG + [(t, 8, 0.85) for t in promoted18])
+    rs = settle_rounds(reads18, [], 40.0, promoted_ts=promoted18)
+    assert rs[0].kills == 3 and rs[0].k_end == 8, f"case18 8-브리지 recall 보존: {rs[0]}"
+
+    print("hud_round_settle selftest: 22/22 OK")
 
 
 if __name__ == "__main__":

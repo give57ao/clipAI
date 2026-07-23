@@ -1,5 +1,23 @@
 # R102 오탐 원인분석 + R19 후보 (2026-07-23 Opus)
 
+## R19 구현 완료 (2026-07-24)
+
+`detect_ace_hud.py`에 `_r19_enemy_win_in_gap()` 함수 + 게이트로 구현(R14와 같은
+detect 레벨, score_win_events 있을 때만 활성). `_R19_OWN_WIN_MARGIN=3.0`.
+
+**전체 GT 코퍼스 재확인 결과 (hud_from_cache.py 재계산 + _compare_hud_gt.py, 재스캔 불필요):**
+- 이전: GT 174건 | 탐지 104 (recall 59.8%) | 검출 122건 중 TP 104 (precision 85.2%)
+- 이후: GT 174건 | 탐지 104 (recall 59.8%) | 검출 **121**건 중 TP 104 (precision **86.0%**)
+- 서브셋(원본보유 68영상): precision 94.2% → **95.3%**
+- **TP 손실 0, FP 정확히 1건(R102) 제거** — 설계대로 동작.
+
+R102 실측: `end_reason`이 `hud_elim`→`enemy_win_in_gap`으로 바뀌며 `ace=False`.
+
+회귀 고정: `files/tests/test_r19_gate.py` (합성 픽스처, R102 지문 + TP보호 3케이스).
+`hud_round_settle.py`가 아닌 `detect_ace_hud.py` 레벨 구현이라 그 selftest는
+변경 없음(22/22 유지) — score_win_events는 settle_rounds 밖 신호이므로 R10/R14와
+같은 계층에 두는 것이 기존 구조와 일관적.
+
 ## Task 1 결과 — 2026-06-24 R102 (4118-4140) 오탐 원인 확정
 
 **결론: boundary_merge FP (진 라운드 2킬 + 이긴 라운드 1킬을 3킬로 병합). CNN 무관 baseline FP.**

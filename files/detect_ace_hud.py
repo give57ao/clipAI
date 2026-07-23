@@ -63,6 +63,19 @@ _WIN_MERGE_MIN_SPAN = 25.0      # 기각에 필요한 최소 킬 폭(첫킬~ace)
                                 # 포기(아래 '한계' 주석의 #122와 함께 수정불가 FP로 분류)
 _KILL_GRACE_SEC = 10.0     # R2 Task 2: 경계 직후 킬이 이전 라운드 막판일 수 있는 최대 간격
 
+# R19(2026-07-24) 적팀-승리 blind-gap 게이트 — R14 폭게이트 사각지대 보완.
+# 실측(ANALYSIS_R102_R19.md): 2026-06-24 R102 boundary_merge FP — 폭 16.9s로
+# R14 기준(_WIN_MERGE_MIN_SPAN=25) 미달이라 못 잡음. gap-stamp 킬(carry~라운드
+# 시작 관측공백에서 발생해 라운드 시작(s)에 그대로 찍힌 킬)의 그 공백 안에
+# '적팀' 라운드승리가 있으면, 그 킬은 우리가 '진' 라운드를 가로지른 것이다 —
+# 진짜 올킬=적 전멸=우리팀 라운드승리뿐이므로 그 킬은 이 라운드 몫이 아니다.
+# side 판별: ace_sec ±_R19_OWN_WIN_MARGIN의 win side를 '우리팀'으로 본다(올킬
+# 이면 정상적으로 거기 우리팀 win이 찍힘 — R14 주석의 3.8~7.1s 지연 분포 참고).
+# ace_sec에 우리팀 win이 없으면 신호 적용 불가로 스킵(보수적, TP 위험 없음).
+# 검증: 현재 전체 ace 스캔에서 이 신호가 걸린 것 — GT-TP 0건, FP후보(R102) 1건
+# (scratchpad/r19_enemy_win_check.py, ANALYSIS_R102_R19.md). TP 위험 없이 FP만 제거.
+_R19_OWN_WIN_MARGIN = 3.0
+
 # R6(2026-07-13): 상단 스코어(팀 승수) 게이트 — 폭0(kill_times 전부 동일 시각)
 # ace 후보 전용. Task 3 실측(HUD_ACE_HANDOFF.md R6 절): 라운드 span 안에 승수
 # win 이벤트가 "있냐 없냐"는 TP/FP가 안 갈림(둘 다 대부분 1개 — 라운드가 이겨서
@@ -799,6 +812,40 @@ def _count_score_win_events(
     )
 
 
+def _r19_enemy_win_in_gap(
+    r: "RoundTrack",
+    ok_reads: list[tuple[float, int]],
+    score_win_events: list[dict],
+) -> bool:
+    """R19(2026-07-24, 상단 `_R19_OWN_WIN_MARGIN` 주석 참고) — gap-stamp 킬의
+    blind gap [carry_t, first_obs] 안에 '적팀'(ace_sec 근방 우리팀 win의 반대편)
+    라운드승리가 있으면 True. ace_sec 근방에 우리팀 win이 없으면 신호 적용 불가로
+    False(보수적 — TP 위험 없음)."""
+    s = r.start_sec
+    n_gap = sum(1 for t in r.kill_times if abs(t - s) < 0.01)
+    if n_gap < 1:
+        return False
+    prevs = [t for (t, _k) in ok_reads if t < s]
+    nexts = [t for (t, _k) in ok_reads if t >= s]
+    carry_t = max(prevs) if prevs else s - 30.0
+    first_obs = min(nexts) if nexts else s
+    lo, hi = carry_t, max(first_obs, r.ace_sec)
+    our = [
+        e.get("side") for e in score_win_events
+        if e.get("kind") == "win"
+        and abs(e.get("t_hi", -1e9) - r.ace_sec) <= _R19_OWN_WIN_MARGIN
+    ]
+    if not our:
+        return False
+    our_side = our[0]
+    return any(
+        e.get("kind") == "win"
+        and lo < e.get("t_hi", -1e9) < hi
+        and e.get("side") != our_side
+        for e in score_win_events
+    )
+
+
 def timeline_from_reads(
     reads: list[KRead],
     *,
@@ -954,6 +1001,19 @@ def timeline_from_reads(
                 if hit:
                     r.ace = False
                     r.end_reason = "win_near_first_kill"
+
+    # R19 게이트 (상단 상수 주석 참고) — R14가 놓친 좁은-폭 boundary_merge 대응.
+    if score_win_events:
+        ok_reads_r19 = [(rr.t, rr.k) for rr in reads if rr.k is not None]
+        for r in rounds:
+            if (
+                r.ace
+                and r.first_kill_sec is not None
+                and r.ace_sec is not None
+                and _r19_enemy_win_in_gap(r, ok_reads_r19, score_win_events)
+            ):
+                r.ace = False
+                r.end_reason = "enemy_win_in_gap"
 
     # R13 스트릭 구제 (2026-07-22) — 미탐 71건 분석 대응 (hud_streak_salvage.py 모듈
     # 주석 참고). 킬 배너의 가짜 경계로 쪼개졌거나 지지 필터가 버린 +3 사다리를

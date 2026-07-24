@@ -10,6 +10,15 @@ v2 모델을 직접 돌려 R4 킬러(0→8 고신뢰 오분류)를 재현하는�
   1) 0→8 오발률 < 0.5%  (claimed-0, held-out stem, model p>=0.92로 8 예측)
   2) 8 포착률            (label='8' 폴더 전체, held-out stem)
   3) D 슬롯 정확도 >= 99% (claimed 폴더의 '_d' 파일만, held-out stem, p>=0.95)
+     ⚠ 2026-07-24 사용자 지적으로 발견: 이 게이트는 "OCR이 이미 성공한 안정런"
+     에서 뽑은 population만 본다 — `hud_kda._read_digit_group`의 CNN-D 폴백은
+     `d is None`(OCR 미판독)일 때만 발동하므로(237행), G3는 CNN-D가 실전에서
+     절대 켜지지 않는 프레임만 재는 셈이었다(안전성과 무관). G4가 실제 population.
+  4) D 슬롯 hardneg(=CNN-D가 실제로 발동하는 population) 자신있게-틀린-숫자
+     0건 유지 (`hardneg_<digit>/`의 '_d' 파일, `_harvest_d_hardneg.py` 산출,
+     held-out stem, p>=0.95). 'junk' 오분류는 값 미주입이라 위험 지표에서 제외
+     (기권과 동일 취급). 최초 실측(2026-07-24, n=118): 위험 0건, 발동시정밀도
+     100%, 커버리지 91.5% — 다만 n이 작아 통계적 상한은 느슨함(피널럿 권장).
 """
 from __future__ import annotations
 
@@ -120,11 +129,38 @@ def main() -> int:
     correctD = sum(1 for (lab, p), y in zip(predsD, d_labels) if lab == y and p >= 0.95)
     rateD = correctD / nD if nD else float("nan")
     print(f"[G3] D슬롯 held-out n={nD}  정확(p>=0.95)={correctD}  "
-          f"정확도={rateD:.2%}  {'PASS' if rateD >= 0.99 else 'FAIL'} (기준 >=99%)")
+          f"정확도={rateD:.2%}  {'PASS' if rateD >= 0.99 else 'FAIL'} (기준 >=99%, "
+          f"참고용 — 위 docstring 참고: 이 population엔 CNN-D가 실전에서 안 켜짐)")
+
+    # --- 게이트 4: D 슬롯 hardneg — CNN-D가 실제로 발동하는 population ---
+    # (`hardneg_<digit>/`의 '_d' 파일, `_harvest_d_hardneg.py` 산출). 위험 지표는
+    # "자신있게 틀린 숫자"만 — 'junk' 오분류는 값 미주입이라 안전(기권과 동일).
+    dh_files, dh_labels = [], []
+    for lbl_dir in sorted(DATA_DIR.glob("hardneg_*")):
+        try:
+            digit = int(lbl_dir.name.split("_", 1)[1])
+        except ValueError:
+            continue
+        for p in held_out_files(lbl_dir, slot="d"):
+            dh_files.append(p)
+            dh_labels.append(digit)
+    predsDH = predict_batch(model, device, dh_files)
+    nDH = len(predsDH)
+    conf_wrong_digit = sum(
+        1 for (lab, p), y in zip(predsDH, dh_labels)
+        if p >= 0.95 and lab != y and lab != "junk"
+    )
+    fired = sum(1 for _lab, p in predsDH if p >= 0.95)
+    rateDH = conf_wrong_digit / nDH if nDH else float("nan")
+    print(f"[G4] D슬롯 hardneg(실발동 population) held-out n={nDH}  "
+          f"자신있게틀린숫자={conf_wrong_digit}  발동률={(fired/nDH if nDH else 0):.1%}  "
+          f"{'PASS' if conf_wrong_digit == 0 else 'FAIL'} (기준: 위험 0건)")
 
     print()
-    print("종합:", "T3 게이트 전부 통과 — T4(파이프라인 전환) 진행 가능"
-          if (rate1 < 0.005 and rateD >= 0.99) else "T3 게이트 미달 — T4 진행 보류, 데이터/모델 재검토 필요")
+    all_pass = rate1 < 0.005 and conf_wrong_digit == 0
+    print("종합:", "안전 게이트(G1/G4) 전부 통과 — 파일럿(캐시 재계산 비교) 권장"
+          if all_pass else "게이트 미달 — 데이터/모델 재검토 필요")
+    print("참고: G3(구 D슬롯 정확도)는 population 오류로 참고용 강등 — G4가 실제 판단 기준")
     return 0
 
 

@@ -13,7 +13,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-ffmpeg, ffprobe가 PATH에 있어야 합니다.
+ffmpeg, ffprobe가 PATH에 있어야 합니다. (참고: 이 PC는 현재 프로젝트 전용
+`.venv`가 아니라 전역 Python 3.11 설치를 그대로 사용 중입니다 — 아래 "exe
+드래그앤드롭 실행기"가 호출하는 인터프리터도 이쪽입니다.)
 
 ## ⚠ 배치 재스캔은 병렬 금지
 

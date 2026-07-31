@@ -90,7 +90,11 @@ def main() -> int:
         _wait_for_key()
         return 0
 
-    run_pipeline(valid)
+    rc = run_pipeline(valid)
+    if rc != 0:
+        print(f"\n파이프라인 실행 중 오류가 발생했습니다 (종료 코드 {rc}).")
+        _wait_for_key()
+        return rc
 
     print(f"\n결과 폴더: {RESULT_CLIPS_DIR}")
     answer = input("여시겠습니까? (Y/N): ").strip().lower()

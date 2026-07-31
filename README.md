@@ -55,6 +55,22 @@ python -u batch_hud_ace_pipeline.py --output-root E:\clipai_result\_r10_eval
 | `--output-root` | `E:\clipai_result` | 산출물 루트 재지정 |
 | `--verify-boundary-wins` | **off** | R10 승수 교차검증 게이트 (아래 참고) |
 
+### exe 드래그앤드롭 실행기
+
+`dist\clipAI_launcher.exe`에 영상 파일 여러 개를 드래그하면 위 배치
+파이프라인을 그 파일들만 대상으로 돌려준다(본인 PC 전용 — 파이썬 인터프리터
+경로가 `launcher.py`에 하드코딩돼 있음). 재빌드가 필요하면:
+
+```powershell
+cd C:\clipAI
+C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe -m pip install pyinstaller
+C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe -m PyInstaller --onefile --console --distpath dist --workpath build --name clipAI_launcher files\launcher.py
+```
+
+인자 없이 더블클릭하면 안내 메시지만 뜨고 종료된다(실수로 전체 배치가
+돌아가는 것을 막기 위함). 전체 배치를 돌리려면 지금처럼
+`python batch_hud_ace_pipeline.py`를 직접 실행할 것.
+
 ### R10 — 승수 교차검증 게이트 (기본 비활성)
 
 라운드 경계를 승수(score) 변화로 교차검증하는 게이트입니다. **기본 꺼져 있으며,

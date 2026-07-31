@@ -19,7 +19,9 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-VENV_PYTHON = Path(r"C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe")
+# 이 PC에는 프로젝트 전용 .venv가 없다 — 전역 Python 설치(torch/opencv/easyocr
+# 직접 설치됨)를 그대로 가리킨다.
+PIPELINE_PYTHON = Path(r"C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe")
 PIPELINE_SCRIPT = Path(r"C:\clipAI\files\batch_hud_ace_pipeline.py")
 RESULT_CLIPS_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 
@@ -61,7 +63,7 @@ def run_pipeline(video_paths: list[Path]) -> int:
 
     try:
         proc = subprocess.run(
-            [str(VENV_PYTHON), "-u", str(PIPELINE_SCRIPT), "--files-list", list_path],
+            [str(PIPELINE_PYTHON), "-u", str(PIPELINE_SCRIPT), "--files-list", list_path],
             cwd=str(PIPELINE_SCRIPT.parent),
         )
         return proc.returncode
@@ -76,8 +78,8 @@ def main() -> int:
         _wait_for_key()
         return 0
 
-    if not VENV_PYTHON.exists():
-        print(f"오류: 파이썬 환경을 찾을 수 없습니다 ({VENV_PYTHON})")
+    if not PIPELINE_PYTHON.exists():
+        print(f"오류: 파이썬 환경을 찾을 수 없습니다 ({PIPELINE_PYTHON})")
         _wait_for_key()
         return 1
 
@@ -99,7 +101,10 @@ def main() -> int:
     print(f"\n결과 폴더: {RESULT_CLIPS_DIR}")
     answer = input("여시겠습니까? (Y/N): ").strip().lower()
     if answer == "y":
-        os.startfile(RESULT_CLIPS_DIR)
+        try:
+            os.startfile(RESULT_CLIPS_DIR)
+        except OSError as exc:
+            print(f"폴더를 열 수 없습니다: {RESULT_CLIPS_DIR} ({exc})")
 
     _wait_for_key()
     return 0

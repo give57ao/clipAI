@@ -136,6 +136,18 @@ def _load_stems_filter(path: Path) -> set[str]:
     }
 
 
+def _load_files_list(path: Path) -> list[Path]:
+    """한 줄에 절대경로 하나씩 적힌 파일 → Path 리스트. 빈 줄은 무시.
+
+    launcher.py(드래그앤드롭 exe 실행기)가 임의 위치의 드롭 파일을
+    OBS_DIR 글롭 없이 그대로 넘기기 위해 사용."""
+    return [
+        Path(line.strip())
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def process_video(
     mp4: Path,
     *,
@@ -227,6 +239,12 @@ def main() -> int:
         help="한 줄에 stem 하나씩 적힌 파일로 대상 제한 (예: GT 서브셋 재평가). "
              "미지정시 --obs-dir 전체 대상(기존 동작)",
     )
+    ap.add_argument(
+        "--files-list",
+        default=None,
+        help="한 줄에 절대경로 하나씩 적힌 파일로 처리 대상 지정 — 지정 시 --obs-dir 글롭을 "
+             "건너뛰고 이 목록만 사용(임의 위치 파일 허용). launcher.py(exe 실행기) 전용.",
+    )
     args = ap.parse_args()
 
     if args.output_root:
@@ -243,14 +261,27 @@ def main() -> int:
         cache_dir = CACHE_DIR
 
     obs = Path(args.obs_dir)
-    videos = sorted(obs.glob("*.mp4"))
-    if args.stems_file:
-        wanted = _load_stems_filter(Path(args.stems_file))
-        videos = [p for p in videos if p.stem in wanted]
-    if args.only:
-        videos = [p for p in videos if p.stem == args.only]
-    if args.after:
-        videos = [p for p in videos if p.stem > args.after]
+    if args.files_list:
+        raw_paths = _load_files_list(Path(args.files_list))
+        videos = []
+        for p in raw_paths:
+            if p.suffix.lower() != ".mp4":
+                print(f"[hud-batch] SKIP {p.name}: not_mp4", flush=True)
+                continue
+            if not p.exists():
+                print(f"[hud-batch] SKIP {p.name}: not_found", flush=True)
+                continue
+            videos.append(p)
+        videos.sort()
+    else:
+        videos = sorted(obs.glob("*.mp4"))
+        if args.stems_file:
+            wanted = _load_stems_filter(Path(args.stems_file))
+            videos = [p for p in videos if p.stem in wanted]
+        if args.only:
+            videos = [p for p in videos if p.stem == args.only]
+        if args.after:
+            videos = [p for p in videos if p.stem > args.after]
     if args.limit > 0:
         videos = videos[: args.limit]
 

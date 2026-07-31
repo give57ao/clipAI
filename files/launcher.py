@@ -3,8 +3,8 @@
 (본인 PC 전용, docs/superpowers/specs/2026-07-31-exe-launcher-design.md 참고).
 
 영상 파일을 이 exe(또는 `python launcher.py <파일...>`) 위로 드래그하면
-기존 .venv를 그대로 호출해 batch_hud_ace_pipeline.py를 실행한다. torch/
-opencv/easyocr는 재포장하지 않는다 — 표준 라이브러리만 사용.
+이 PC의 전역 파이썬(torch/opencv/easyocr 설치됨)으로 batch_hud_ace_pipeline.py를
+실행한다. 표준 라이브러리만 사용하여 재포장하지 않는다.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-VENV_PYTHON = Path(r"C:\clipAI\.venv\Scripts\python.exe")
+VENV_PYTHON = Path(r"C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe")
 PIPELINE_SCRIPT = Path(r"C:\clipAI\files\batch_hud_ace_pipeline.py")
 RESULT_CLIPS_DIR = Path(r"E:\clipai_result\ace_clips_hud")
 

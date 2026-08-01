@@ -129,6 +129,34 @@ def test_process_txt_file_skips_missing_source_file(tmp_path):
     assert skipped == 1
 
 
+def test_process_txt_file_strips_utf8_bom(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    txt = tmp_path / "req.txt"
+    txt.write_bytes(("﻿" + f"{video}   13:45 - 14:20\n").encode("utf-8"))
+
+    class FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(clip_cutter.subprocess, "run", lambda cmd, **kwargs: FakeCompleted())
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 1
+    assert skipped == 0
+
+
+def test_process_txt_file_skips_bad_encoding_without_crashing(tmp_path):
+    txt = tmp_path / "req.txt"
+    txt.write_bytes("경로.mp4 13:45 - 14:20".encode("euc-kr"))
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 0
+    assert skipped == 1
+
+
 def test_process_txt_file_skips_none_marker(tmp_path):
     video = tmp_path / "video.mp4"
     video.write_bytes(b"")
@@ -226,6 +254,26 @@ def test_main_shows_folder_prompt_only_when_success_gt_zero(tmp_path, monkeypatc
     assert rc == 0
     assert "결과 폴더" not in out
     assert "처리할 구간이 없습니다." in out
+
+
+def test_main_shows_error_when_output_dir_cannot_be_created(tmp_path, monkeypatch, capsys):
+    txt = tmp_path / "req.txt"
+    txt.write_text("dummy\n", encoding="utf-8")
+    monkeypatch.setattr(clip_cutter.sys, "argv", ["clip_cutter.py", str(txt)])
+    monkeypatch.setattr(clip_cutter, "find_ffmpeg", lambda: "ffmpeg.exe")
+
+    class FailingPath:
+        def mkdir(self, parents=True, exist_ok=True):
+            raise OSError("drive not mounted")
+
+    monkeypatch.setattr(clip_cutter, "OUTPUT_DIR", FailingPath())
+    monkeypatch.setattr(clip_cutter, "_wait_for_key", lambda: None)
+
+    rc = clip_cutter.main()
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "결과 폴더를 만들 수 없습니다" in out
 
 
 def test_main_folder_open_guarded_against_oserror(tmp_path, monkeypatch, capsys):

@@ -16,6 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 def parse_timecode(text: str) -> float:
     """'13:45' -> 825.0 (분:초), '1:8:55' -> 4135.0 (시:분:초).
@@ -148,7 +152,13 @@ def process_txt_file(txt_path: Path, output_dir: Path, ffmpeg_path: str) -> tupl
     집계에 포함하지 않는다."""
     success = 0
     skipped = 0
-    for line in txt_path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = txt_path.read_text(encoding="utf-8-sig").splitlines()
+    except UnicodeDecodeError:
+        print(f"[clip] SKIP {txt_path.name} (텍스트 인코딩을 읽을 수 없음 — UTF-8로 저장해주세요)")
+        return success, skipped + 1
+
+    for line in lines:
         if not line.strip():
             continue
 
@@ -222,7 +232,12 @@ def main() -> int:
         _wait_for_key()
         return 0
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"오류: 결과 폴더를 만들 수 없습니다 ({OUTPUT_DIR}): {exc}")
+        _wait_for_key()
+        return 1
 
     total_success = 0
     total_skipped = 0
@@ -251,4 +266,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:  # noqa: BLE001 - last-resort guard so the console window never vanishes silently
+        print(f"\n예상치 못한 오류가 발생했습니다: {exc}")
+        _wait_for_key()
+        raise

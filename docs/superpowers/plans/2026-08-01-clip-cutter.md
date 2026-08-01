@@ -766,7 +766,7 @@ E:\OBS\<선택한 영상 파일명>.mp4    0:01 - 0:05
 Run: `C:\clipAI\dist\clipAI_clipper.exe "C:\clipAI\smoke_request.txt"` (또는 탐색기에서 실제로 드래그)
 Expected 출력에 포함: `[clip] OK <영상파일명> 0:01 - 0:05 -> <영상파일명>_00m01s.mp4`(시작 2초 안전막 때문에 실제로는 0초부터 잘리지만 파일명 라벨은 요청한 시작시각 `0:01` 기준), `성공 1개 / 건너뜀 0개`, `결과 폴더: E:\clipai_result\manual_clips`, `여시겠습니까? (Y/N):` 프롬프트.
 
-확인: `E:\clipai_result\manual_clips\<영상파일명>_00m01s.mp4` 파일이 실제로 생성되었고 재생 가능한지 확인(`ffprobe`로 duration이 대략 6초(요청한 4초 + 프리롤 2초) 안팎인지 확인 가능).
+확인: `E:\clipai_result\manual_clips\<영상파일명>_00m01s.mp4` 파일이 실제로 생성되었고 재생 가능한지 확인(`ffprobe`로 duration이 대략 5초 안팎인지 확인 가능 — 이 예시는 시작 시각 0:01이 2초 프리롤보다 작아 클램프가 걸리는 케이스라, `-t`는 클램프된 시작 기준 `end - adjusted_start`로 계산되어 요청한 종료 시각(0:05)을 넘기지 않는다. 클램프 이전 계획 단계의 "(종료-시작)+2초" 공식이었다면 약 6초가 나왔겠지만, 리뷰에서 그 공식이 클램프 시 종료 시각을 최대 2초까지 초과시키는 버그로 지적되어 실제 코드는 다르게 구현됐다 — 자세한 내용은 `docs/superpowers/specs/2026-08-01-clip-cutter-design.md`의 "구현 중 수정 사항" 참고).
 
 작업 후 `smoke_request.txt`와 생성된 스모크 테스트 클립은 삭제해도 무방(테스트용 산출물).
 

@@ -7,10 +7,11 @@ venv/
 .env
 .env.*
 
-# PyInstaller build artifacts (launcher.py -> clipAI_launcher.exe)
+# PyInstaller build artifacts (launcher.py -> clipAI_launcher.exe, clip_cutter.py -> clipAI_clipper.exe)
 /dist/
 /build/
 /clipAI_launcher.spec
+/clipAI_clipper.spec
 
 # IDE / local tools
 .claude/

@@ -108,3 +108,12 @@ def test_build_ffmpeg_command_clamps_negative_start():
     )
 
     assert cmd[cmd.index("-ss") + 1] == "0.000"
+
+
+def test_build_ffmpeg_command_duration_matches_requested_end_when_clamped():
+    cmd = clip_cutter.build_ffmpeg_command(
+        "ffmpeg.exe", Path("in.mp4"), 1.0, 10.0, Path("out.mp4")
+    )
+
+    assert cmd[cmd.index("-ss") + 1] == "0.000"
+    assert cmd[cmd.index("-t") + 1] == "10.000"

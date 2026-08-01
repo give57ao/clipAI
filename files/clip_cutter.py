@@ -109,7 +109,7 @@ def build_ffmpeg_command(
     시작 부분이 잘려나가는 것을 막는다(0초 미만이면 0으로 클램프). 끝은
     요청한 시각 그대로 유지한다(뒷부분에 여유가 더 붙는 것은 허용)."""
     adjusted_start = max(start - PRE_ROLL_SECONDS, 0.0)
-    duration = (end - start) + PRE_ROLL_SECONDS
+    duration = end - adjusted_start
     return [
         ffmpeg_path,
         "-y",

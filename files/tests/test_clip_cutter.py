@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import clip_cutter
@@ -68,3 +70,41 @@ def test_parse_ranges_end_before_start_marks_error():
     result = clip_cutter.parse_ranges("14:20 - 13:45")
 
     assert result == [("14:20 - 13:45", 860.0, 825.0, "시작>=종료")]
+
+
+def test_format_start_label_minutes_seconds():
+    assert clip_cutter.format_start_label(825.0) == "13m45s"
+
+
+def test_format_start_label_with_hours():
+    assert clip_cutter.format_start_label(4135.0) == "1h08m55s"
+
+
+def test_build_output_path():
+    result = clip_cutter.build_output_path(
+        Path("E:/clipai_result/manual_clips"), "video", 825.0
+    )
+
+    assert result == Path("E:/clipai_result/manual_clips/video_13m45s.mp4")
+
+
+def test_build_ffmpeg_command_applies_preroll_and_duration():
+    cmd = clip_cutter.build_ffmpeg_command(
+        "ffmpeg.exe", Path("in.mp4"), 100.0, 130.0, Path("out.mp4")
+    )
+
+    assert cmd[0] == "ffmpeg.exe"
+    assert cmd[cmd.index("-ss") + 1] == "98.000"
+    assert cmd[cmd.index("-i") + 1] == "in.mp4"
+    assert cmd[cmd.index("-t") + 1] == "32.000"
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert "-avoid_negative_ts" in cmd
+    assert cmd[-1] == "out.mp4"
+
+
+def test_build_ffmpeg_command_clamps_negative_start():
+    cmd = clip_cutter.build_ffmpeg_command(
+        "ffmpeg.exe", Path("in.mp4"), 1.0, 10.0, Path("out.mp4")
+    )
+
+    assert cmd[cmd.index("-ss") + 1] == "0.000"

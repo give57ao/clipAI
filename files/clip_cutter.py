@@ -10,6 +10,7 @@ batch_hud_ace_pipeline.py나 torch/opencv/easyocr는 전혀 거치지 않는다.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -76,3 +77,51 @@ def parse_ranges(
             continue
         results.append((token, start, end, None))
     return results
+
+
+PRE_ROLL_SECONDS = 2.0
+
+
+def format_start_label(seconds: float) -> str:
+    """825.0 -> '13m45s', 4135.0 -> '1h08m55s' (파일명용 시작시각 표기)."""
+    total = max(int(round(seconds)), 0)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}h{m:02d}m{s:02d}s"
+    return f"{m:02d}m{s:02d}s"
+
+
+def build_output_path(output_dir: Path, source_stem: str, start_seconds: float) -> Path:
+    label = format_start_label(start_seconds)
+    return output_dir / f"{source_stem}_{label}.mp4"
+
+
+def find_ffmpeg() -> str | None:
+    return shutil.which("ffmpeg")
+
+
+def build_ffmpeg_command(
+    ffmpeg_path: str, source: Path, start: float, end: float, output: Path
+) -> list[str]:
+    """스트림 복사(-c copy)로 [start-PRE_ROLL_SECONDS, end] 구간을 잘라내는
+    ffmpeg 커맨드를 조립한다. 시작을 앞당겨 -ss로 넘겨 키프레임 스냅으로
+    시작 부분이 잘려나가는 것을 막는다(0초 미만이면 0으로 클램프). 끝은
+    요청한 시각 그대로 유지한다(뒷부분에 여유가 더 붙는 것은 허용)."""
+    adjusted_start = max(start - PRE_ROLL_SECONDS, 0.0)
+    duration = (end - start) + PRE_ROLL_SECONDS
+    return [
+        ffmpeg_path,
+        "-y",
+        "-ss",
+        f"{adjusted_start:.3f}",
+        "-i",
+        str(source),
+        "-t",
+        f"{duration:.3f}",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
+        str(output),
+    ]

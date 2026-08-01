@@ -10,7 +10,9 @@ batch_hud_ace_pipeline.py나 torch/opencv/easyocr는 전혀 거치지 않는다.
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -125,3 +127,128 @@ def build_ffmpeg_command(
         "make_zero",
         str(output),
     ]
+
+
+OUTPUT_DIR = Path(r"E:\clipai_result\manual_clips")
+
+
+def _wait_for_key() -> None:
+    print("\n아무 키나 누르면 닫힙니다...")
+    try:
+        import msvcrt
+
+        msvcrt.getch()
+    except ImportError:
+        input()
+
+
+def process_txt_file(txt_path: Path, output_dir: Path, ffmpeg_path: str) -> tuple[int, int]:
+    """txt_path의 각 줄을 처리해 (성공한 구간 수, 건너뛴 구간/줄 수)를
+    반환한다. '없음'으로 명시적으로 스킵된 줄은 에러가 아니므로 건너뜀
+    집계에 포함하지 않는다."""
+    success = 0
+    skipped = 0
+    for line in txt_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+
+        split = split_path_and_ranges(line)
+        if split is None:
+            print(f"[clip] SKIP {line.strip()} (.mp4 경로를 찾을 수 없음)")
+            skipped += 1
+            continue
+
+        path_str, ranges_str = split
+        source = Path(path_str)
+        if not source.exists():
+            print(f"[clip] SKIP {source.name} (파일 없음)")
+            skipped += 1
+            continue
+
+        ranges = parse_ranges(ranges_str)
+        if not ranges:
+            print(f"[clip] SKIP {source.name} (없음)")
+            continue
+
+        for raw, start, end, error in ranges:
+            if error is not None:
+                print(f"[clip] SKIP {source.name} 구간 '{raw}' ({error})")
+                skipped += 1
+                continue
+
+            output_path = build_output_path(output_dir, source.stem, start)
+            cmd = build_ffmpeg_command(ffmpeg_path, source, start, end, output_path)
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            if proc.returncode != 0:
+                print(f"[clip] SKIP {source.name} 구간 '{raw}' (ffmpeg 실패)")
+                print(proc.stderr)
+                skipped += 1
+                continue
+
+            print(f"[clip] OK {source.name} {raw} -> {output_path.name}")
+            success += 1
+
+    return success, skipped
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        print("잘라낼 구간이 적힌 .txt 파일을 이 exe 위로 드래그하세요.")
+        _wait_for_key()
+        return 0
+
+    ffmpeg_path = find_ffmpeg()
+    if ffmpeg_path is None:
+        print("오류: ffmpeg를 찾을 수 없습니다 (PATH 확인).")
+        _wait_for_key()
+        return 1
+
+    txt_files: list[Path] = []
+    for raw in args:
+        p = Path(raw).resolve()
+        if p.suffix.lower() != ".txt":
+            print(f"무시: {p.name} (txt 아님)")
+            continue
+        if not p.exists():
+            print(f"무시: {p.name} (파일 없음)")
+            continue
+        txt_files.append(p)
+
+    if not txt_files:
+        print("처리할 .txt 파일이 없습니다.")
+        _wait_for_key()
+        return 0
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    total_success = 0
+    total_skipped = 0
+    for txt in txt_files:
+        success, skipped = process_txt_file(txt, OUTPUT_DIR, ffmpeg_path)
+        total_success += success
+        total_skipped += skipped
+
+    print(f"\n성공 {total_success}개 / 건너뜀 {total_skipped}개")
+
+    if total_success == 0:
+        print("처리할 구간이 없습니다.")
+        _wait_for_key()
+        return 0
+
+    print(f"\n결과 폴더: {OUTPUT_DIR}")
+    answer = input("여시겠습니까? (Y/N): ").strip().lower()
+    if answer == "y":
+        try:
+            os.startfile(OUTPUT_DIR)
+        except OSError as exc:
+            print(f"폴더를 열 수 없습니다: {OUTPUT_DIR} ({exc})")
+
+    _wait_for_key()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -117,3 +117,134 @@ def test_build_ffmpeg_command_duration_matches_requested_end_when_clamped():
 
     assert cmd[cmd.index("-ss") + 1] == "0.000"
     assert cmd[cmd.index("-t") + 1] == "10.000"
+
+
+def test_process_txt_file_skips_missing_source_file(tmp_path):
+    txt = tmp_path / "req.txt"
+    txt.write_text(r"E:\OBS\gone.mp4   13:45 - 14:20" + "\n", encoding="utf-8")
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 0
+    assert skipped == 1
+
+
+def test_process_txt_file_skips_none_marker(tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    txt = tmp_path / "req.txt"
+    txt.write_text(f"{video}   없음\n", encoding="utf-8")
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 0
+    assert skipped == 0
+
+
+def test_process_txt_file_runs_ffmpeg_for_valid_range(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    txt = tmp_path / "req.txt"
+    txt.write_text(f"{video}   13:45 - 14:20\n", encoding="utf-8")
+
+    captured = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return FakeCompleted()
+
+    monkeypatch.setattr(clip_cutter.subprocess, "run", fake_run)
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 1
+    assert skipped == 0
+    assert captured["cmd"][0] == "ffmpeg.exe"
+    assert str(video) in captured["cmd"]
+
+
+def test_process_txt_file_skips_ffmpeg_failure(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    txt = tmp_path / "req.txt"
+    txt.write_text(f"{video}   13:45 - 14:20\n", encoding="utf-8")
+
+    class FakeCompleted:
+        returncode = 1
+        stderr = "boom"
+
+    monkeypatch.setattr(clip_cutter.subprocess, "run", lambda cmd, **kwargs: FakeCompleted())
+
+    success, skipped = clip_cutter.process_txt_file(txt, tmp_path, "ffmpeg.exe")
+
+    assert success == 0
+    assert skipped == 1
+
+
+def test_main_no_args_prints_usage(monkeypatch, capsys):
+    monkeypatch.setattr(clip_cutter.sys, "argv", ["clip_cutter.py"])
+    monkeypatch.setattr(clip_cutter, "_wait_for_key", lambda: None)
+
+    rc = clip_cutter.main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "드래그하세요" in out
+
+
+def test_main_skips_non_txt_files(tmp_path, monkeypatch, capsys):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"")
+    monkeypatch.setattr(clip_cutter.sys, "argv", ["clip_cutter.py", str(video)])
+    monkeypatch.setattr(clip_cutter, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(clip_cutter, "_wait_for_key", lambda: None)
+
+    rc = clip_cutter.main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "txt 아님" in out
+    assert "처리할 .txt 파일이 없습니다." in out
+
+
+def test_main_shows_folder_prompt_only_when_success_gt_zero(tmp_path, monkeypatch, capsys):
+    txt = tmp_path / "req.txt"
+    txt.write_text("dummy\n", encoding="utf-8")
+    monkeypatch.setattr(clip_cutter.sys, "argv", ["clip_cutter.py", str(txt)])
+    monkeypatch.setattr(clip_cutter, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(clip_cutter, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.setattr(clip_cutter, "process_txt_file", lambda *a, **k: (0, 1))
+    monkeypatch.setattr(clip_cutter, "_wait_for_key", lambda: None)
+
+    rc = clip_cutter.main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "결과 폴더" not in out
+    assert "처리할 구간이 없습니다." in out
+
+
+def test_main_folder_open_guarded_against_oserror(tmp_path, monkeypatch, capsys):
+    txt = tmp_path / "req.txt"
+    txt.write_text("dummy\n", encoding="utf-8")
+    monkeypatch.setattr(clip_cutter.sys, "argv", ["clip_cutter.py", str(txt)])
+    monkeypatch.setattr(clip_cutter, "find_ffmpeg", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(clip_cutter, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.setattr(clip_cutter, "process_txt_file", lambda *a, **k: (1, 0))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    def boom(path):
+        raise OSError("no such folder")
+
+    monkeypatch.setattr(clip_cutter.os, "startfile", boom, raising=False)
+    monkeypatch.setattr(clip_cutter, "_wait_for_key", lambda: None)
+
+    rc = clip_cutter.main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "폴더를 열 수 없습니다" in out

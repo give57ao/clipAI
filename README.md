@@ -73,6 +73,35 @@ C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe -m PyInstaller
 돌아가는 것을 막기 위함). 전체 배치를 돌리려면 지금처럼
 `python batch_hud_ace_pipeline.py`를 직접 실행할 것.
 
+### 수동 구간 자르기 exe
+
+이미 골라둔 "몇분부터 몇분까지" 구간들을 텍스트로 적어두면 그대로
+잘라주는 두 번째 실행기(`clipAI_clipper.exe`, 본인 PC 전용 —
+`clip_cutter.py`가 시스템 PATH의 `ffmpeg`를 그대로 호출한다).
+HUD 자동탐지나 파이썬 파이프라인은 전혀 거치지 않는다.
+
+메모장 등으로 아래 형식의 `.txt` 파일을 만들어 `dist\clipAI_clipper.exe`에
+드래그한다:
+
+```
+E:\OBS\2026-06-30 22-24-03.mp4        13:45 - 14:20, 25:18 - 25:35
+E:\OBS\2026-07-03 20-07-56.mp4     없음
+```
+
+- 시간은 `분:초`(`13:45`) 또는 `시:분:초`(`1:8:55`) 자유롭게. 구간은
+  콤마로 여러 개 나열, `없음`이면 그 영상은 통째로 건너뜀.
+- 스트림 복사라 빠르지만 키프레임 스냅 때문에 시작 2초 정도는 미리
+  당겨서 잘린다(끝은 요청한 그대로 — 뒤에 살짝 여유가 붙는 정도).
+- 결과는 `E:\clipai_result\manual_clips\`에 `<원본파일명>_<시작시각>.mp4`
+  형식으로 저장.
+
+재빌드가 필요하면:
+
+```powershell
+cd C:\clipAI
+C:\Users\give5\AppData\Local\Programs\Python\Python311\python.exe -m PyInstaller --onefile --console --distpath dist --workpath build --name clipAI_clipper files\clip_cutter.py
+```
+
 ### R10 — 승수 교차검증 게이트 (기본 비활성)
 
 라운드 경계를 승수(score) 변화로 교차검증하는 게이트입니다. **기본 꺼져 있으며,

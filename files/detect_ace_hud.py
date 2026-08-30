@@ -1068,7 +1068,9 @@ def extract_ace_clips(
 ) -> list[Path]:
     from extract_labeled_clips import run_ffmpeg_extract
 
-    out_dir = output_dir / Path(timeline.video_path).stem
+    # 영상별 하위 폴더로 나누지 않고 output_dir에 바로 저장 — 파일명 자체에 이미
+    # 원본 영상 stem이 접두사로 들어가 있어 평탄화해도 이름 충돌이 없다.
+    out_dir = output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for r in timeline.rounds:
